@@ -10,21 +10,52 @@ agent = IntelligentDataAgent() # Persistent Agent Instance
 def index():
     return render_template('index.html')
 
+def allowed_file(filename):
+    """Check if file has allowed extension."""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in current_app.config['ALLOWED_EXTENSIONS']
+
+
 @main_bp.route('/upload', methods=['POST'])
 def upload_files():
     if 'files' not in request.files:
-        flash('No file part')
+        flash('No file part', 'danger')
         return redirect(url_for('main.index'))
     
     files = request.files.getlist('files')
     saved_paths = []
+    errors = []
 
     for file in files:
-        if file.filename == '': continue
-        filename = secure_filename(file.filename)
-        path = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
-        file.save(path)
-        saved_paths.append(path)
+        if file.filename == '':
+            errors.append('Empty filename')
+            continue
+        
+        # Validate file extension
+        if not allowed_file(file.filename):
+            errors.append(f"'{file.filename}' - Invalid file type. Only .xlsx, .xls, .csv allowed")
+            continue
+        
+        try:
+            filename = secure_filename(file.filename)
+            path = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
+            file.save(path)
+            
+            # Verify file actually exists before proceeding
+            if not os.path.exists(path) or os.path.getsize(path) == 0:
+                errors.append(f"'{filename}' - File save failed or empty")
+                continue
+            
+            saved_paths.append(path)
+        except Exception as e:
+            errors.append(f"'{file.filename}' - Error: {str(e)}")
+    
+    # Show any errors
+    for error in errors:
+        flash(error, 'warning')
+    
+    if not saved_paths:
+        flash('No valid files were uploaded', 'danger')
+        return redirect(url_for('main.index'))
     
     # Trigger Ingestion
     try:

@@ -27,9 +27,25 @@ class IntelligentDataAgent:
         DATA_MEMORY.clear() # Clear old session data
         metadata_log = []
 
+        if not file_paths:
+            metadata_log.append("❌ No files provided for ingestion")
+            return metadata_log
+
         for path in file_paths:
+            # Validate file exists
+            if not os.path.exists(path):
+                logger.error(f"File not found: {path}")
+                metadata_log.append(f"❌ File not found: {path}")
+                continue
+            
             filename = os.path.basename(path)
-            xl = pd.ExcelFile(path)
+            
+            try:
+                xl = pd.ExcelFile(path)
+            except Exception as e:
+                logger.error(f"Failed to read Excel file {path}: {e}")
+                metadata_log.append(f"❌ Failed to read {filename}: {str(e)}")
+                continue
             
             for sheet in xl.sheet_names:
                 df = xl.parse(sheet)
@@ -67,10 +83,17 @@ class IntelligentDataAgent:
                     unique_sheet_name = f"{os.path.splitext(filename)[0]}_{sheet}"
                     DATA_MEMORY[unique_sheet_name] = df
                     
-                    metadata_log.append(f"Loaded '{unique_sheet_name}'. Detected ID: '{id_col}'")
+                    metadata_log.append(f"✅ Loaded '{unique_sheet_name}' ({len(df)} rows). ID column: '{id_col}'")
                     
                 except Exception as e:
                     logger.error(f"Error analyzing {sheet}: {e}")
+                    metadata_log.append(f"⚠️ Error processing sheet '{sheet}': {str(e)}")
+        
+        # Final summary
+        if DATA_MEMORY:
+            metadata_log.append(f"\n✅ Total tables loaded: {len(DATA_MEMORY)}")
+        else:
+            metadata_log.append("❌ No data was successfully loaded. Check file formats and content.")
         
         return metadata_log
 
@@ -91,8 +114,9 @@ class IntelligentDataAgent:
             self.llm,
             df_list,
             verbose=True,
-            allow_dangerous_code=True, # Required to run pandas code
-            handle_parsing_errors=True
+            allow_dangerous_code=True,
+            # Move error handling config here:
+            agent_executor_kwargs={"handle_parsing_errors": True} 
         )
 
         # Context Prompt to explain the data structure to the LLM
