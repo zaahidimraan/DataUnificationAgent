@@ -1,9 +1,7 @@
-"""
-Entry point for the Data Unification Agent application.
-"""
 from app import create_app
 
 app = create_app()
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    # Debug mode allows live reloading when you change code
+    app.run(debug=True, port=5000)

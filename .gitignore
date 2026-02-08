@@ -2,3 +2,6 @@ venv
 logs
 outputs
 uploads
+*.pyc
+*.xlsx
+*.csv

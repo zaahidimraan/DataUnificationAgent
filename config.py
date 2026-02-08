@@ -1,33 +1,12 @@
-"""
-Configuration settings for the Data Unification Agent.
-"""
 import os
 
 class Config:
-    """Base configuration."""
-    SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
-    BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-    
-    # Upload settings
-    UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
-    OUTPUT_FOLDER = os.path.join(BASE_DIR, 'outputs')
-    LOG_FOLDER = os.path.join(BASE_DIR, 'logs')
-    MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB max file size
-    
-    # Allowed file extensions
-    ALLOWED_EXTENSIONS = {'csv', 'json', 'xlsx', 'xls', 'xml'}
+    SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-key-12345'
+    UPLOAD_FOLDER = os.path.join(os.getcwd(), 'uploads')
+    OUTPUT_FOLDER = os.path.join(os.getcwd(), 'outputs')
+    LOG_FOLDER = os.path.join(os.getcwd(), 'logs')
+    ALLOWED_EXTENSIONS = {'xlsx', 'xls', 'csv'}
 
-class DevelopmentConfig(Config):
-    """Development configuration."""
-    DEBUG = True
-
-class ProductionConfig(Config):
-    """Production configuration."""
-    DEBUG = False
-
-# Configuration dictionary
-config = {
-    'development': DevelopmentConfig,
-    'production': ProductionConfig,
-    'default': DevelopmentConfig
-}
+    # Ensure directories exist
+    for folder in [UPLOAD_FOLDER, OUTPUT_FOLDER, LOG_FOLDER]:
+        os.makedirs(folder, exist_ok=True)

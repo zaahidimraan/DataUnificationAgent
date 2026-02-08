@@ -3,334 +3,82 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Data Unification Agent</title>
+    <title>AI Data Unification Agent</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
-        
-        .container {
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            padding: 40px;
-            max-width: 800px;
-            width: 100%;
-        }
-        
-        h1 {
-            color: #667eea;
-            text-align: center;
-            margin-bottom: 10px;
-            font-size: 2.5em;
-        }
-        
-        .subtitle {
-            text-align: center;
-            color: #666;
-            margin-bottom: 30px;
-        }
-        
-        .upload-area {
-            border: 3px dashed #667eea;
-            border-radius: 10px;
-            padding: 40px;
-            text-align: center;
-            margin-bottom: 20px;
-            cursor: pointer;
-            transition: all 0.3s;
-        }
-        
-        .upload-area:hover {
-            background: #f8f9ff;
-            border-color: #764ba2;
-        }
-        
-        .upload-area.dragover {
-            background: #f0f3ff;
-            border-color: #764ba2;
-        }
-        
-        #fileInput {
-            display: none;
-        }
-        
-        .file-list {
-            margin: 20px 0;
-            max-height: 200px;
-            overflow-y: auto;
-        }
-        
-        .file-item {
-            background: #f8f9ff;
-            padding: 10px;
-            margin: 5px 0;
-            border-radius: 5px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        
-        .btn {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            padding: 15px 30px;
-            border-radius: 25px;
-            cursor: pointer;
-            font-size: 16px;
-            font-weight: bold;
-            transition: transform 0.2s;
-            width: 100%;
-            margin-top: 10px;
-        }
-        
-        .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
-        }
-        
-        .btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-        
-        .status {
-            margin-top: 20px;
+        body { background-color: #f8f9fa; }
+        .agent-console {
+            background-color: #1e1e1e;
+            color: #00ff00;
+            font-family: 'Courier New', Courier, monospace;
             padding: 15px;
-            border-radius: 10px;
-            text-align: center;
-            display: none;
+            border-radius: 5px;
+            height: 300px;
+            overflow-y: auto;
+            border: 1px solid #333;
         }
-        
-        .status.success {
-            background: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
-        }
-        
-        .status.error {
-            background: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
-        }
-        
-        .status.info {
-            background: #d1ecf1;
-            color: #0c5460;
-            border: 1px solid #bee5eb;
-        }
-        
-        .results {
-            margin-top: 20px;
-            padding: 20px;
-            background: #f8f9ff;
-            border-radius: 10px;
-            display: none;
-        }
-        
-        .results h3 {
-            color: #667eea;
-            margin-bottom: 10px;
-        }
-        
-        .spinner {
-            border: 3px solid #f3f3f3;
-            border-top: 3px solid #667eea;
-            border-radius: 50%;
-            width: 30px;
-            height: 30px;
-            animation: spin 1s linear infinite;
-            margin: 10px auto;
-            display: none;
-        }
-        
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
+        .log-entry { margin-bottom: 5px; border-bottom: 1px solid #333; padding-bottom: 2px;}
+        .card { box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>🔄 Data Unification Agent</h1>
-        <p class="subtitle">Upload multiple data files to unify them into one</p>
-        
-        <div class="upload-area" id="uploadArea">
-            <h3>📁 Drop files here or click to upload</h3>
-            <p>Supported formats: CSV, JSON, Excel (XLSX, XLS)</p>
-            <input type="file" id="fileInput" multiple accept=".csv,.json,.xlsx,.xls">
-        </div>
-        
-        <div class="file-list" id="fileList"></div>
-        
-        <button class="btn" id="uploadBtn" disabled>Upload Files</button>
-        <button class="btn" id="unifyBtn" disabled>Unify Data</button>
-        
-        <div class="spinner" id="spinner"></div>
-        <div class="status" id="status"></div>
-        <div class="results" id="results"></div>
-    </div>
-    
-    <script>
-        const uploadArea = document.getElementById('uploadArea');
-        const fileInput = document.getElementById('fileInput');
-        const fileList = document.getElementById('fileList');
-        const uploadBtn = document.getElementById('uploadBtn');
-        const unifyBtn = document.getElementById('unifyBtn');
-        const status = document.getElementById('status');
-        const results = document.getElementById('results');
-        const spinner = document.getElementById('spinner');
-        
-        let selectedFiles = [];
-        let uploadedFiles = [];
-        
-        // Click to upload
-        uploadArea.addEventListener('click', () => fileInput.click());
-        
-        // File selection
-        fileInput.addEventListener('change', (e) => {
-            handleFiles(e.target.files);
-        });
-        
-        // Drag and drop
-        uploadArea.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            uploadArea.classList.add('dragover');
-        });
-        
-        uploadArea.addEventListener('dragleave', () => {
-            uploadArea.classList.remove('dragover');
-        });
-        
-        uploadArea.addEventListener('drop', (e) => {
-            e.preventDefault();
-            uploadArea.classList.remove('dragover');
-            handleFiles(e.dataTransfer.files);
-        });
-        
-        function handleFiles(files) {
-            selectedFiles = Array.from(files);
-            displayFiles();
-            uploadBtn.disabled = selectedFiles.length === 0;
-        }
-        
-        function displayFiles() {
-            fileList.innerHTML = selectedFiles.map((file, index) => `
-                <div class="file-item">
-                    <span>${file.name} (${formatBytes(file.size)})</span>
-                    <button onclick="removeFile(${index})" style="background:none;border:none;color:#dc3545;cursor:pointer;">✕</button>
+
+<div class="container mt-5">
+    <div class="row justify-content-center">
+        <div class="col-md-8">
+            <div class="text-center mb-4">
+                <h1>🤖 Data Unification Agent</h1>
+                <p class="text-muted">Upload messy Excel sheets. Get one clean Master File.</p>
+            </div>
+
+            <div class="card mb-4">
+                <div class="card-body">
+                    <form method="post" enctype="multipart/form-data">
+                        <div class="mb-3">
+                            <label for="file" class="form-label">Select Excel or CSV File</label>
+                            <input class="form-control" type="file" id="file" name="file" required>
+                        </div>
+                        <button type="submit" class="btn btn-primary w-100">🚀 Run Agent</button>
+                    </form>
                 </div>
-            `).join('');
-        }
-        
-        function removeFile(index) {
-            selectedFiles.splice(index, 1);
-            displayFiles();
-            uploadBtn.disabled = selectedFiles.length === 0;
-        }
-        
-        function formatBytes(bytes) {
-            if (bytes === 0) return '0 Bytes';
-            const k = 1024;
-            const sizes = ['Bytes', 'KB', 'MB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
-        }
-        
-        uploadBtn.addEventListener('click', async () => {
-            const formData = new FormData();
-            selectedFiles.forEach(file => formData.append('files', file));
-            
-            showStatus('info', 'Uploading files...');
-            showSpinner(true);
-            
-            try {
-                const response = await fetch('/api/upload', {
-                    method: 'POST',
-                    body: formData
-                });
-                
-                const data = await response.json();
-                
-                if (response.ok) {
-                    uploadedFiles = data.files;
-                    showStatus('success', `${data.count} file(s) uploaded successfully!`);
-                    unifyBtn.disabled = false;
-                } else {
-                    showStatus('error', data.error || 'Upload failed');
-                }
-            } catch (error) {
-                showStatus('error', 'Upload failed: ' + error.message);
-            } finally {
-                showSpinner(false);
-            }
-        });
-        
-        unifyBtn.addEventListener('click', async () => {
-            showStatus('info', 'Unifying data...');
-            showSpinner(true);
-            results.style.display = 'none';
-            
-            try {
-                const response = await fetch('/api/unify', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({files: uploadedFiles})
-                });
-                
-                const data = await response.json();
-                
-                if (response.ok && data.success) {
-                    showStatus('success', 'Data unified successfully!');
-                    displayResults(data);
-                } else {
-                    showStatus('error', data.error || 'Unification failed');
-                }
-            } catch (error) {
-                showStatus('error', 'Unification failed: ' + error.message);
-            } finally {
-                showSpinner(false);
-            }
-        });
-        
-        function showStatus(type, message) {
-            status.className = 'status ' + type;
-            status.textContent = message;
-            status.style.display = 'block';
-        }
-        
-        function showSpinner(show) {
-            spinner.style.display = show ? 'block' : 'none';
-        }
-        
-        function displayResults(data) {
-            results.innerHTML = `
-                <h3>✅ Unification Complete</h3>
-                <p><strong>Output File:</strong> ${data.output_file}</p>
-                <p><strong>Total Rows:</strong> ${data.rows}</p>
-                <p><strong>Total Columns:</strong> ${data.columns}</p>
-                <p><strong>Columns:</strong> ${data.column_names.join(', ')}</p>
-                <button class="btn" onclick="downloadFile('${data.output_file}')">Download Result</button>
-            `;
-            results.style.display = 'block';
-        }
-        
-        function downloadFile(filename) {
-            window.location.href = `/api/download/${filename}`;
-        }
-    </script>
+            </div>
+
+            {% if error %}
+            <div class="alert alert-danger" role="alert">
+                {{ error }}
+            </div>
+            {% endif %}
+
+            {% if download_filename %}
+            <div class="alert alert-success text-center" role="alert">
+                <h4 class="alert-heading">Processing Complete!</h4>
+                <p>The agent has unified your data successfully.</p>
+                <hr>
+                <a href="{{ url_for('main.download_file', filename=download_filename) }}" class="btn btn-success btn-lg">
+                    📥 Download Unified File
+                </a>
+            </div>
+            {% endif %}
+
+            {% if logs %}
+            <div class="card">
+                <div class="card-header bg-dark text-white">
+                    Agent Thinking Process
+                </div>
+                <div class="card-body p-0">
+                    <div class="agent-console">
+                        {% for log in logs %}
+                            <div class="log-entry">> {{ log }}</div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>

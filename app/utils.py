@@ -1,59 +1,30 @@
-"""
-Helper functions for logging and configuration.
-"""
-import os
 import logging
-from datetime import datetime
-from flask import current_app
+import os
+from logging.handlers import RotatingFileHandler
+from config import Config
 
-def allowed_file(filename):
+def setup_logger(name="data_agent"):
     """
-    Check if a file has an allowed extension.
-    
-    Args:
-        filename (str): Name of the file to check
-        
-    Returns:
-        bool: True if file extension is allowed
+    Configures a logger that writes to both file and console.
     """
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in current_app.config['ALLOWED_EXTENSIONS']
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
 
-def setup_logging(app):
-    """
-    Configure logging for the application.
-    
-    Args:
-        app: Flask application instance
-    """
-    log_dir = app.config['LOG_FOLDER']
-    os.makedirs(log_dir, exist_ok=True)
-    
-    log_file = os.path.join(
-        log_dir, 
-        f"app_{datetime.now().strftime('%Y%m%d')}.log"
-    )
-    
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ]
-    )
-    
-    app.logger.setLevel(logging.INFO)
-    app.logger.info("Application logging initialized")
+    if not logger.handlers:
+        # 1. File Handler (Rotates after 1MB)
+        log_file = os.path.join(Config.LOG_FOLDER, 'app.log')
+        file_handler = RotatingFileHandler(log_file, maxBytes=1024*1024, backupCount=10)
+        file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(module)s - %(message)s')
+        file_handler.setFormatter(file_formatter)
+        logger.addHandler(file_handler)
 
-def log_info(message):
-    """Log an info message."""
-    current_app.logger.info(message)
+        # 2. Console Handler
+        console_handler = logging.StreamHandler()
+        console_formatter = logging.Formatter('%(levelname)s: %(message)s')
+        console_handler.setFormatter(console_formatter)
+        logger.addHandler(console_handler)
 
-def log_error(message):
-    """Log an error message."""
-    current_app.logger.error(message)
+    return logger
 
-def log_warning(message):
-    """Log a warning message."""
-    current_app.logger.warning(message)
+# Initialize the global logger
+logger = setup_logger()
