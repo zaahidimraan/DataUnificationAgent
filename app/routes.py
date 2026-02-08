@@ -1,68 +1,67 @@
 import os
-from flask import Blueprint, render_template, request, current_app, send_from_directory, flash, redirect, url_for
+from flask import Blueprint, render_template, request, current_app, send_from_directory, flash, redirect, url_for, session
 from werkzeug.utils import secure_filename
-from app.services import DataUnificationAgent
+from app.services import IntelligentDataAgent
 
 main_bp = Blueprint('main', __name__)
-
-def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in current_app.config['ALLOWED_EXTENSIONS']
+agent = IntelligentDataAgent() # Persistent Agent Instance
 
 @main_bp.route('/', methods=['GET', 'POST'])
 def index():
-    logs = []
-    download_filename = None
-    error = None
+    return render_template('index.html')
 
-    if request.method == 'POST':
-        # 1. Validation
-        if 'file' not in request.files:
-            flash('No file part')
-            return redirect(request.url)
+@main_bp.route('/upload', methods=['POST'])
+def upload_files():
+    if 'files' not in request.files:
+        flash('No file part')
+        return redirect(url_for('main.index'))
+    
+    files = request.files.getlist('files')
+    saved_paths = []
+
+    for file in files:
+        if file.filename == '': continue
+        filename = secure_filename(file.filename)
+        path = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
+        file.save(path)
+        saved_paths.append(path)
+    
+    # Trigger Ingestion
+    try:
+        logs = agent.ingest_files(saved_paths)
+        session['logs'] = logs # Store logs to show user
+        flash(f"Successfully ingested {len(files)} files. Ready for queries!", "success")
+    except Exception as e:
+        flash(f"Error during ingestion: {str(e)}", "danger")
+
+    return redirect(url_for('main.index'))
+
+@main_bp.route('/query', methods=['POST'])
+def query():
+    user_query = request.form.get('query_text')
+    
+    if not user_query:
+        return redirect(url_for('main.index'))
+
+    try:
+        # The agent executes the logic and saves 'query_result.xlsx'
+        result_text = agent.query_data(user_query)
         
-        file = request.files['file']
+        output_file = 'query_result.xlsx'
+        output_path = os.path.join(current_app.config['OUTPUT_FOLDER'], output_file)
         
-        if file.filename == '':
-            flash('No selected file')
-            return redirect(request.url)
+        if os.path.exists(output_path):
+            return render_template('index.html', 
+                                   logs=session.get('logs', []), 
+                                   answer=result_text, 
+                                   download_file=output_file)
+        else:
+            flash(f"Agent reply: {result_text} (No file generated)", "warning")
             
-        if file and allowed_file(file.filename):
-            filename = secure_filename(file.filename)
-            upload_path = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
-            file.save(upload_path)
-            
-            # 2. Trigger the Intelligent Agent
-            try:
-                agent = DataUnificationAgent(upload_path)
-                
-                # Run the logic (Phase 2 code)
-                unified_df, execution_logs = agent.run()
-                logs = execution_logs # Pass logs to UI
-                
-                if unified_df is not None:
-                    # 3. Save Output
-                    output_filename = f"Unified_{filename}"
-                    if output_filename.endswith('.csv'):
-                        output_filename = output_filename.replace('.csv', '.xlsx')
-                    else:
-                        # Ensure extension is .xlsx
-                        base = os.path.splitext(output_filename)[0]
-                        output_filename = base + ".xlsx"
+    except Exception as e:
+        flash(f"Query Error: {str(e)}", "danger")
 
-                    output_path = os.path.join(current_app.config['OUTPUT_FOLDER'], output_filename)
-                    unified_df.to_excel(output_path, index=False)
-                    
-                    download_filename = output_filename
-                    flash('File processed successfully!', 'success')
-                else:
-                    error = "Agent could not merge data. Check logs."
-            
-            except Exception as e:
-                error = f"Critical Error: {str(e)}"
-                logs.append(str(e))
-
-    return render_template('index.html', logs=logs, download_filename=download_filename, error=error)
+    return render_template('index.html', logs=session.get('logs', []))
 
 @main_bp.route('/download/<filename>')
 def download_file(filename):

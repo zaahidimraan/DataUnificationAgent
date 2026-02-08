@@ -2,83 +2,74 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Data Unification Agent</title>
+    <title>Gemini Data Agent</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        body { background-color: #f8f9fa; }
-        .agent-console {
-            background-color: #1e1e1e;
-            color: #00ff00;
-            font-family: 'Courier New', Courier, monospace;
-            padding: 15px;
-            border-radius: 5px;
-            height: 300px;
-            overflow-y: auto;
-            border: 1px solid #333;
-        }
-        .log-entry { margin-bottom: 5px; border-bottom: 1px solid #333; padding-bottom: 2px;}
-        .card { box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-    </style>
 </head>
-<body>
+<body class="bg-light">
 
 <div class="container mt-5">
-    <div class="row justify-content-center">
-        <div class="col-md-8">
-            <div class="text-center mb-4">
-                <h1>🤖 Data Unification Agent</h1>
-                <p class="text-muted">Upload messy Excel sheets. Get one clean Master File.</p>
-            </div>
+    <div class="text-center mb-5">
+        <h1>🧠 Gemini 2.0 Data Analyst</h1>
+        <p class="text-muted">Upload multiple property files. Ask complex questions.</p>
+    </div>
 
-            <div class="card mb-4">
-                <div class="card-body">
-                    <form method="post" enctype="multipart/form-data">
-                        <div class="mb-3">
-                            <label for="file" class="form-label">Select Excel or CSV File</label>
-                            <input class="form-control" type="file" id="file" name="file" required>
-                        </div>
-                        <button type="submit" class="btn btn-primary w-100">🚀 Run Agent</button>
-                    </form>
+    <div class="card mb-4 shadow-sm">
+        <div class="card-header bg-primary text-white">Step 1: Upload Data Sources</div>
+        <div class="card-body">
+            <form action="/upload" method="post" enctype="multipart/form-data">
+                <div class="input-group">
+                    <input type="file" class="form-control" name="files" multiple required>
+                    <button class="btn btn-dark" type="submit">Ingest Files</button>
                 </div>
-            </div>
-
-            {% if error %}
-            <div class="alert alert-danger" role="alert">
-                {{ error }}
-            </div>
-            {% endif %}
-
-            {% if download_filename %}
-            <div class="alert alert-success text-center" role="alert">
-                <h4 class="alert-heading">Processing Complete!</h4>
-                <p>The agent has unified your data successfully.</p>
-                <hr>
-                <a href="{{ url_for('main.download_file', filename=download_filename) }}" class="btn btn-success btn-lg">
-                    📥 Download Unified File
-                </a>
-            </div>
-            {% endif %}
-
-            {% if logs %}
-            <div class="card">
-                <div class="card-header bg-dark text-white">
-                    Agent Thinking Process
-                </div>
-                <div class="card-body p-0">
-                    <div class="agent-console">
-                        {% for log in logs %}
-                            <div class="log-entry">> {{ log }}</div>
-                        {% endfor %}
-                    </div>
-                </div>
-            </div>
-            {% endif %}
-
+                <small class="text-muted">Supports .xlsx with multiple sheets (Master, History, Repairs...)</small>
+            </form>
         </div>
     </div>
-</div>
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="alert alert-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+
+    {% if logs %}
+    <div class="alert alert-info">
+        <strong>System Knowledge:</strong>
+        <ul class="mb-0">
+            {% for log in logs %}
+                <li>{{ log }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    <div class="card shadow-lg border-0">
+        <div class="card-header bg-success text-white">Step 2: Ask the Agent</div>
+        <div class="card-body">
+            <form action="/query" method="post">
+                <div class="mb-3">
+                    <label class="form-label">What do you want to analyze?</label>
+                    <textarea class="form-control" name="query_text" rows="3" placeholder="Example: Combine the Property Master list with the Repair History and show me the total repair cost per property type."></textarea>
+                </div>
+                <button type="submit" class="btn btn-success w-100">Run Analysis & Generate Report</button>
+            </form>
+        </div>
+    </div>
+
+    {% if download_file %}
+    <div class="mt-4 text-center">
+        <div class="card bg-warning bg-opacity-10 border-warning">
+            <div class="card-body">
+                <h3>🎉 Report Generated!</h3>
+                <p>{{ answer }}</p>
+                <a href="{{ url_for('main.download_file', filename=download_file) }}" class="btn btn-primary btn-lg">📥 Download Result Excel</a>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+</div>
 </body>
 </html>

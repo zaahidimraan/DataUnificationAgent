@@ -5,3 +5,4 @@ uploads
 *.pyc
 *.xlsx
 *.csv
+.env

@@ -1,55 +1,46 @@
 import pandas as pd
-import numpy as np
-import os
+import random
 
-def create_messy_data():
-    print("Generating messy data...")
-
-    # --- Sheet 1: Flats ---
-    # Scenario: Standard columns, explicit ID name
+def create_complex_data():
+    # File 1: Master Records (Static Info)
+    # Sheet A: Flats
     df_flats = pd.DataFrame({
-        'Flat_ID': ['1001', '1002', '1003', '1004'],
-        'Price': [120000, 135000, 95000, 110000],
-        'Area': [650, 700, 500, 600],
-        'Bedrooms': [2, 2, 1, 2]
+        'Flat_ID': [f'F-{i}' for i in range(1, 11)],
+        'Area': [random.randint(500, 1000) for _ in range(10)],
+        'Purchase_Price': [random.randint(100000, 200000) for _ in range(10)]
     })
-
-    # --- Sheet 2: Houses ---
-    # Scenario: 
-    # 1. Different ID Header ('House_Ref')
-    # 2. Semantic overlap ('Cost' instead of 'Price', 'SqFt' instead of 'Area')
-    # 3. CONFLICT: ID '1001' exists here too! (Should trigger conflict resolution)
-    df_houses = pd.DataFrame({
-        'House_Ref': ['1001', '2002', '2003'],  # <--- '1001' duplicates a Flat ID
-        'Cost': [250000, 320000, 280000],       # <--- Synonymous with Price
-        'SqFt': [1200, 1500, 1350],             # <--- Synonymous with Area
-        'Garage': ['Yes', 'Yes', 'No']          # <--- Unique column to Houses
-    })
-
-    # --- Sheet 3: Villas ---
-    # Scenario: 
-    # 1. Ambiguous ID Header ('Code')
-    # 2. 'Amount' instead of 'Price'
-    df_villas = pd.DataFrame({
-        'Code': ['V-301', 'V-302', 'V-303'],
-        'Amount': [500000, 750000, 600000],
-        'Garden_Size': [500, 800, 600],
-        'Pool': ['Yes', 'Yes', 'No']
-    })
-
-    # --- Save to Excel ---
-    output_file = 'messy_properties.xlsx'
     
-    # Create a Pandas Excel writer using XlsxWriter as the engine
-    with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
-        df_flats.to_excel(writer, sheet_name='Flats', index=False)
-        df_houses.to_excel(writer, sheet_name='Houses', index=False)
-        df_villas.to_excel(writer, sheet_name='Villas', index=False)
+    # Sheet B: Villas
+    df_villas = pd.DataFrame({
+        'Villa_Ref': [f'V-{i}' for i in range(1, 6)],
+        'Garden_Size': [random.randint(200, 500) for _ in range(5)],
+        'Purchase_Price': [random.randint(500000, 900000) for _ in range(5)]
+    })
 
-    print(f"Success! Created '{output_file}' with 3 sheets.")
-    print("1. Flats (ID: Flat_ID)")
-    print("2. Houses (ID: House_Ref) -> Contains ID conflict '1001'")
-    print("3. Villas (ID: Code)")
+    # File 2: History (Transactions)
+    # Sheet: Repair_Logs (Links to both Flats and Villas)
+    
+    # Create mixed IDs (Flats and Villas having repairs)
+    repair_ids = [f'F-{random.randint(1,10)}' for _ in range(15)] + \
+                 [f'V-{random.randint(1,5)}' for _ in range(5)]
+                 
+    df_repairs = pd.DataFrame({
+        'Property_Code': repair_ids, # Note: Different header name!
+        'Repair_Date': pd.date_range(start='1/1/2023', periods=20),
+        'Cost': [random.randint(100, 2000) for _ in range(20)],
+        'Description': ['Plumbing', 'Electrical', 'Paint', 'Roof', 'Window'] * 4
+    })
+
+    # Save File 1
+    with pd.ExcelWriter('data_master_properties.xlsx') as writer:
+        df_flats.to_excel(writer, sheet_name='Flats_Master', index=False)
+        df_villas.to_excel(writer, sheet_name='Villas_Master', index=False)
+
+    # Save File 2
+    with pd.ExcelWriter('data_property_history.xlsx') as writer:
+        df_repairs.to_excel(writer, sheet_name='Repairs_History', index=False)
+
+    print("Created 'data_master_properties.xlsx' and 'data_property_history.xlsx'")
 
 if __name__ == "__main__":
-    create_messy_data()
+    create_complex_data()

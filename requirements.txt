@@ -1,6 +1,8 @@
 flask
 pandas
 openpyxl
-scikit-learn
-python-levenshtein
-werkzeug
+langchain
+langchain-google-genai
+langchain-experimental
+tabulate
+python-dotenv
