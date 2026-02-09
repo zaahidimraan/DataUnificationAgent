@@ -2,144 +2,201 @@ import pandas as pd
 import numpy as np
 import random
 import os
-from datetime import datetime, timedelta
 
-def generate_complex_data():
-    print("🚀 Generating complex mock data...")
+def generate_hard_data():
+    print("🚀 Generating Challenge Data (Composite Keys & schema variations)...")
     
-    # Ensure output directory exists
-    output_dir = "mock_data_batch"
+    output_dir = "complex_data"
     os.makedirs(output_dir, exist_ok=True)
 
     # ==========================================
-    # 1. MASTER FILE (Excel - Multi-sheet)
+    # 0. BASE DATA GENERATION (The "Truth")
     # ==========================================
-    # Contains the "Truth" IDs for Flats and Villas
+    # We generate a "Truth" list first so that the files actually link together,
+    # even if the column names are different.
     
-    # Generate IDs
-    flat_ids = [f'FL-{i:03d}' for i in range(1, 21)]  # FL-001 to FL-020
-    villa_ids = [f'VL-{i:03d}' for i in range(1, 11)] # VL-001 to VL-010
-    all_property_ids = flat_ids + villa_ids
-
-    df_flats = pd.DataFrame({
-        'Property_ID': flat_ids,
-        'Type': 'Flat',
-        'Area_SqFt': np.random.randint(600, 1500, len(flat_ids)),
-        'Bedrooms': np.random.choice([1, 2, 3], len(flat_ids)),
-        'Base_Price': np.random.randint(150000, 400000, len(flat_ids))
-    })
-
-    df_villas = pd.DataFrame({
-        'Ref_Code': villa_ids, # Note: Different header name for ID
-        'Type': 'Villa',
-        'Plot_Area': np.random.randint(2000, 5000, len(villa_ids)),
-        'Has_Pool': np.random.choice(['Yes', 'No'], len(villa_ids)),
-        'Base_Price': np.random.randint(800000, 2000000, len(villa_ids))
-    })
-
-    master_path = os.path.join(output_dir, "01_Master_Property_List.xlsx")
-    with pd.ExcelWriter(master_path) as writer:
-        df_flats.to_excel(writer, sheet_name='Flats_Registry', index=False)
-        df_villas.to_excel(writer, sheet_name='Villas_Registry', index=False)
-    print(f"✅ Created Master File: {master_path}")
-
-
-    # ==========================================
-    # 2. REPAIR HISTORY (CSV)
-    # ==========================================
-    # Foreign Key: 'Prop_ID' maps to Master IDs
-    # Primary Key: 'Ticket_ID'
+    cities = ['NY', 'LDN', 'DXB']
+    buildings = [f'B-{i}' for i in range(1, 6)] # B-1 to B-5
     
-    num_repairs = 50
-    repair_data = {
-        'Ticket_ID': [f'REP-{random.randint(1000, 9999)}' for _ in range(num_repairs)],
-        'Prop_ID': [random.choice(all_property_ids) for _ in range(num_repairs)],
-        'Repair_Date': [datetime(2023, 1, 1) + timedelta(days=random.randint(0, 365)) for _ in range(num_repairs)],
-        'Issue_Type': np.random.choice(['Plumbing', 'Electrical', 'HVAC', 'Paint', 'Roof'], num_repairs),
-        'Cost_USD': np.random.randint(100, 2500, num_repairs),
-        'Status': np.random.choice(['Completed', 'Pending', 'In Progress'], num_repairs, p=[0.7, 0.2, 0.1])
-    }
-    
-    df_repairs = pd.DataFrame(repair_data)
-    repair_path = os.path.join(output_dir, "02_Repair_History_Log.csv")
-    df_repairs.to_csv(repair_path, index=False)
-    print(f"✅ Created Repair Log: {repair_path}")
+    # 1. FLATS (Composite Key: City + Building + Flat_Num)
+    flat_records = []
+    for city in cities:
+        for bldg in buildings:
+            for f_num in range(101, 106): # Flats 101-105
+                flat_records.append({
+                    'City': city,
+                    'Building': bldg,
+                    'Flat_ID': f_num,
+                    'Type': 'Flat',
+                    'Area': random.randint(500, 1200)
+                })
 
-
-    # ==========================================
-    # 3. PRICE INCREASE HISTORY (Excel)
-    # ==========================================
-    # Tracks market value changes over years.
-    # Composite Key logic: ID + Year
-    
-    price_records = []
-    years = [2021, 2022, 2023]
-    
-    for pid in all_property_ids:
-        base = 200000 if 'FL' in pid else 900000
-        for year in years:
-            # Random fluctuation
-            market_val = base * (1 + (random.uniform(-0.02, 0.08) * (year - 2020)))
-            price_records.append({
-                'Asset_Ref': pid,  # Foreign Key
-                'Valuation_Year': year,
-                'Market_Value': round(market_val, 2),
-                'Assessor': random.choice(['Agency A', 'Agency B', 'Govt'])
+    # 2. VILLAS (Composite Key: City + Villa_No)
+    villa_records = []
+    for city in cities:
+        for v_num in range(1, 6): # Villas 1-5 per city
+            villa_records.append({
+                'City': city,
+                'Villa_ID': f'V-{v_num}',
+                'Type': 'Villa',
+                'Garden': random.choice(['Yes', 'No'])
             })
 
-    df_prices = pd.DataFrame(price_records)
-    price_path = os.path.join(output_dir, "03_Market_Value_Trends.xlsx")
-    df_prices.to_excel(price_path, sheet_name='Yearly_Valuations', index=False)
-    print(f"✅ Created Price Trends: {price_path}")
-
+    # 3. HOUSES (Simple Key: House_Code)
+    house_records = []
+    for h in range(1, 11):
+        house_records.append({
+            'House_Code': f'H-{h:03d}',
+            'Type': 'House',
+            'Floors': random.randint(1, 3)
+        })
 
     # ==========================================
-    # 4. TENANT LEASING HISTORY (CSV)
+    # FILE 1: MASTER REGISTRY (Excel - Multi Sheet)
     # ==========================================
-    # Foreign Key: 'Unit_Number'
+    # Scenario: Clean-ish headers, but different naming conventions per sheet.
     
-    tenant_records = []
-    for _ in range(30): # 30 random leases
-        start_date = datetime(2022, 1, 1) + timedelta(days=random.randint(0, 500))
-        tenant_records.append({
-            'Lease_ID': f'L-{random.randint(100, 999)}',
-            'Unit_Number': random.choice(all_property_ids),
-            'Tenant_Name': f"Tenant_{random.randint(1, 100)}",
-            'Start_Date': start_date.strftime('%Y-%m-%d'),
-            'Lease_Term_Months': random.choice([6, 12, 24]),
-            'Monthly_Rent': random.randint(1200, 5000)
+    df_f = pd.DataFrame(flat_records)
+    df_f.rename(columns={'City': 'City_Code', 'Building': 'Bldg_Ref', 'Flat_ID': 'Unit_No'}, inplace=True)
+    
+    df_v = pd.DataFrame(villa_records)
+    df_v.rename(columns={'City': 'City_Code', 'Villa_ID': 'Villa_No'}, inplace=True)
+    
+    df_h = pd.DataFrame(house_records)
+    # House keeps 'House_Code'
+    
+    path1 = os.path.join(output_dir, "01_Property_Registry.xlsx")
+    with pd.ExcelWriter(path1) as writer:
+        df_f.to_excel(writer, sheet_name='Flats_Master', index=False)
+        df_v.to_excel(writer, sheet_name='Villas_Master', index=False)
+        df_h.to_excel(writer, sheet_name='Houses_Master', index=False)
+    
+    print(f"✅ Created File 1: {path1} (Master Registry)")
+
+    # ==========================================
+    # FILE 2: RENTAL CONTRACTS (CSV) - Flats Only
+    # ==========================================
+    # Scenario: COMPOSITE KEY MAPPING REQUIRED
+    # Headers are completely different: 'C_ID', 'B_ID', 'F_ID'
+    
+    rent_data = []
+    for rec in flat_records:
+        if random.random() > 0.3: # 70% have rent info
+            rent_data.append({
+                'C_ID': rec['City'],         # Maps to City_Code
+                'B_ID': rec['Building'],     # Maps to Bldg_Ref
+                'F_ID': rec['Flat_ID'],      # Maps to Unit_No
+                'Monthly_Rent': random.randint(1500, 4000),
+                'Tenant': f"Tenant_{random.randint(100,999)}"
+            })
+            
+    df_rent = pd.DataFrame(rent_data)
+    path2 = os.path.join(output_dir, "02_Rental_Agreements.csv")
+    df_rent.to_csv(path2, index=False)
+    print(f"✅ Created File 2: {path2} (Rentals - Flats)")
+
+    # ==========================================
+    # FILE 3: SALES MARKET PRICES (Excel) - Villas & Houses
+    # ==========================================
+    # Scenario: Different Property Types, Different Keys
+    
+    # Villas (Composite: Region + V_Code)
+    sale_villas = []
+    for rec in villa_records:
+        sale_villas.append({
+            'Region': rec['City'],        # Maps to City_Code
+            'V_Code': rec['Villa_ID'],    # Maps to Villa_No
+            'Sale_Price': random.randint(500000, 1500000)
+        })
+
+    # Houses (Simple: H_Ref)
+    sale_houses = []
+    for rec in house_records:
+        sale_houses.append({
+            'H_Ref': rec['House_Code'],   # Maps to House_Code
+            'Listing_Price': random.randint(300000, 800000)
+        })
+
+    path3 = os.path.join(output_dir, "03_Market_Prices.xlsx")
+    with pd.ExcelWriter(path3) as writer:
+        pd.DataFrame(sale_villas).to_excel(writer, sheet_name='Villa_Prices', index=False)
+        pd.DataFrame(sale_houses).to_excel(writer, sheet_name='House_Prices', index=False)
+    print(f"✅ Created File 3: {path3} (Sales - Villas/Houses)")
+
+    # ==========================================
+    # FILE 4: MAINTENANCE LOGS (CSV) - All Types Mixed
+    # ==========================================
+    # Scenario: The "Messy" File.
+    # It tries to use one set of columns for everything.
+    # Key columns: 'Key_1', 'Key_2', 'Key_3'
+    # For Flats: Key_1=City, Key_2=Bldg, Key_3=Flat
+    # For Villas: Key_1=City, Key_2=Villa, Key_3=NaN
+    # For Houses: Key_1=House, Key_2=NaN, Key_3=NaN
+    
+    maint_data = []
+    
+    # Add some flats
+    for rec in flat_records[:5]:
+        maint_data.append({
+            'Key_1': rec['City'],
+            'Key_2': rec['Building'],
+            'Key_3': rec['Flat_ID'],
+            'Property_Type': 'Flat',
+            'Cost': random.randint(100, 500)
         })
         
-    df_tenants = pd.DataFrame(tenant_records)
-    tenant_path = os.path.join(output_dir, "04_Lease_Records.csv")
-    df_tenants.to_csv(tenant_path, index=False)
-    print(f"✅ Created Lease Records: {tenant_path}")
+    # Add some villas
+    for rec in villa_records[:5]:
+        maint_data.append({
+            'Key_1': rec['City'],
+            'Key_2': rec['Villa_ID'],
+            'Key_3': None, # Empty
+            'Property_Type': 'Villa',
+            'Cost': random.randint(500, 1000)
+        })
 
+    # Add some houses
+    for rec in house_records[:5]:
+        maint_data.append({
+            'Key_1': rec['House_Code'],
+            'Key_2': None,
+            'Key_3': None,
+            'Property_Type': 'House',
+            'Cost': random.randint(200, 600)
+        })
+
+    path4 = os.path.join(output_dir, "04_Maintenance_Log.csv")
+    pd.DataFrame(maint_data).to_csv(path4, index=False)
+    print(f"✅ Created File 4: {path4} (Maintenance - Mixed Keys)")
 
     # ==========================================
-    # 5. TAX & UTILITY EXPENSES (Excel)
+    # FILE 5: GOVT TAXES (Excel)
     # ==========================================
-    # Foreign Key: 'Property_Code'
+    # Scenario: Generic column names 'Ref_A', 'Ref_B', 'Ref_C'
     
-    expense_records = []
-    for pid in all_property_ids:
-        # Create records for Q1 and Q2 2024
-        for q in ['Q1', 'Q2']:
-            expense_records.append({
-                'Property_Code': pid,
-                'Fiscal_Year': 2024,
-                'Quarter': q,
-                'Municipal_Tax': random.randint(500, 1500),
-                'Water_Fee': random.randint(100, 300),
-                'Electricity_Fee': random.randint(200, 800)
-            })
+    tax_data = []
+    # Mix of all data again
+    for rec in flat_records:
+        tax_data.append({
+            'Ref_A': rec['City'],
+            'Ref_B': rec['Building'],
+            'Ref_C': rec['Flat_ID'],
+            'Tax_Amt': 150
+        })
+    for rec in villa_records:
+        tax_data.append({
+            'Ref_A': rec['City'],
+            'Ref_B': rec['Villa_ID'],
+            'Ref_C': 'N/A',
+            'Tax_Amt': 400
+        })
+        
+    path5 = os.path.join(output_dir, "05_Government_Taxes.xlsx")
+    with pd.ExcelWriter(path5) as writer:
+        pd.DataFrame(tax_data).to_excel(writer, sheet_name='2024_Taxes', index=False)
+    print(f"✅ Created File 5: {path5} (Taxes - Generic Keys)")
 
-    df_expenses = pd.DataFrame(expense_records)
-    expense_path = os.path.join(output_dir, "05_Tax_And_Utilities.xlsx")
-    df_expenses.to_excel(expense_path, sheet_name='2024_Expenses', index=False)
-    print(f"✅ Created Expenses File: {expense_path}")
-
-    print("\n🎉 All files generated in folder: /mock_data_batch")
+    print("\n🎉 DONE! 5 Complex files generated in 'complex_data/' folder.")
 
 if __name__ == "__main__":
-    generate_complex_data()
+    generate_hard_data()

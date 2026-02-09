@@ -1,9 +1,8 @@
 import pandas as pd
 import os
-import operator
+import json
 from typing import Annotated, List, Dict, TypedDict, Union
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, END
 from app.utils import setup_logger
 
@@ -13,19 +12,26 @@ logger = setup_logger("langgraph_agent")
 class AgentState(TypedDict):
     # Inputs
     file_paths: List[str]
-    dfs_sample_str: str  # String representation of headers & first 3 rows
+    dfs_sample_str: str  
     output_folder: str
     
-    # Internal Reasoning State
-    strategy: str        # The current plan
-    identifiers: str     # Identified Keys (e.g., "ID in Sheet A matches Ref in Sheet B")
-    schema: str          # The proposed final column structure
+    # Phase 1: Identification State
+    identifiers: str
+    id_feedback: str
+    id_confidence: float
+    id_retries: int
     
-    # Control Flow
-    iteration: int       # Loop counter
-    is_satisfied: bool   # Stopping condition
-    final_code: str      # Python code to execute the merge
+    # Phase 2: Schema State
+    schema: str
+    schema_feedback: str
+    schema_confidence: float
+    schema_retries: int
+    
+    # Phase 3: Execution State
+    final_code: str
     execution_result: str
+    execution_error: str
+    execution_retries: int
 
 # --- THE AGENT CLASS ---
 class UnificationGraphAgent:
@@ -38,193 +44,668 @@ class UnificationGraphAgent:
 
     def _load_samples(self, file_paths):
         """Helper to load lightweight samples for the LLM."""
+        logger.info("📁 Loading file samples for analysis...")
         context = ""
+        file_count = 0
+        sheet_count = 0
+        
         for path in file_paths:
             try:
                 filename = os.path.basename(path)
+                # Handle CSV
                 if path.endswith('.csv'):
                     df = pd.read_csv(path)
                     sample = df.head(3).to_markdown(index=False)
                     context += f"\nFILE: {filename}\nTYPE: CSV\nCOLUMNS: {list(df.columns)}\nSAMPLE:\n{sample}\n"
-                else:
+                    file_count += 1
+                    logger.info(f"  ✓ Loaded CSV: {filename} ({len(df.columns)} columns, {len(df)} rows)")
+                # Handle Excel
+                elif path.endswith(('.xlsx', '.xls')):
                     xl = pd.ExcelFile(path)
                     for sheet in xl.sheet_names:
                         df = xl.parse(sheet)
                         sample = df.head(3).to_markdown(index=False)
                         context += f"\nFILE: {filename}\nSHEET: {sheet}\nCOLUMNS: {list(df.columns)}\nSAMPLE:\n{sample}\n"
+                        sheet_count += 1
+                        logger.info(f"  ✓ Loaded Excel: {filename} - Sheet '{sheet}' ({len(df.columns)} columns, {len(df)} rows)")
+                    file_count += 1
             except Exception as e:
-                logger.error(f"Error loading sample {path}: {e}")
+                logger.error(f"  ✗ Error loading sample {path}: {e}")
+        
+        logger.info(f"📊 Sample loading complete: {file_count} files, {sheet_count} sheets analyzed")
         return context
 
-    # --- NODES ---
-
-    def node_strategy_maker(self, state: AgentState):
-        """Analyzes state and decides plan."""
-        iteration = state.get("iteration", 0)
-        current_schema = state.get("schema", "None yet")
-        
-        prompt = f"""
-        You are the STRATEGY MAKER for a Data Unification Task.
-        
-        DATA CONTEXT:
-        {state['dfs_sample_str']}
-        
-        CURRENT STATUS:
-        - Iteration: {iteration}/3
-        - Current Proposed Schema: {current_schema}
-        
-        YOUR TASK:
-        1. Analyze the data relationships.
-        2. if 'Current Proposed Schema' is "None yet" or seems incomplete/wrong, propose a HIGH-LEVEL MERGE STRATEGY.
-        3. If the schema looks solid and covers all data needs, Output "SATISFIED".
-        
-        OUTPUT FORMAT:
-        Start your response with either "SATISFIED" or "PLAN: [Your detailed strategy here]".
-        """
-        response = self.llm.invoke(prompt).content
-        
-        is_satisfied = False
-        strategy_text = response
-        
-        if "SATISFIED" in response.upper() or iteration >= 3:
-            is_satisfied = True
-        
-        return {
-            "strategy": strategy_text,
-            "is_satisfied": is_satisfied,
-            "iteration": iteration + 1
-        }
+    # ============================================================
+    # PHASE 1: IDENTIFICATION LOOP
+    # ============================================================
 
     def node_identifier(self, state: AgentState):
-        """Finds linking keys."""
+        """Identifies linking keys (single or composite)."""
+        retry_count = state.get("id_retries", 0)
+        previous_feedback = state.get("id_feedback", "")
+        
+        logger.info("="*60)
+        logger.info("🔍 PHASE 1: IDENTIFICATION")
+        logger.info(f"Attempt #{retry_count + 1}")
+        if previous_feedback:
+            logger.info(f"📝 Addressing feedback from previous attempt")
+        logger.info("="*60)
+        
+        feedback_context = ""
+        if previous_feedback:
+            feedback_context = f"\n**PREVIOUS ATTEMPT FEEDBACK (Retry {retry_count}):**\n{previous_feedback}\n\nYou MUST address these concerns in your new proposal."
+        
         prompt = f"""
-        You are the IDENTIFIER.
+You are the IDENTIFIER - an expert in relational database design.
+
+**DATA CONTEXT:**
+{state['dfs_sample_str']}
+
+**YOUR TASK:**
+Analyze ALL files/sheets and identify the linking keys (single or composite) that will enable unification.
+
+**CRITICAL REQUIREMENTS:**
+1. **Identify the Max Key Dimension**: Find which entity has the MOST identifiers.
+   Example: If "Flats" has (City, Building, Flat_No) = 3 keys, this becomes the master structure.
+   
+2. **Map ALL Entities to This Structure**: For simpler entities:
+   - If "Houses" only has (House_ID), map it as: Key1='0', Key2='0', Key3=House_ID
+   - Explain the constant padding strategy clearly.
+   
+3. **Handle ID Conflicts**: If different entity types might have overlapping IDs:
+   - Propose a prefix strategy (e.g., 'F-' for Flats, 'H-' for Houses).
+   
+4. **Be Specific**: For EACH file/sheet, output:
+   - Key1_Source: (column name OR '0')
+   - Key2_Source: (column name OR '0')  
+   - Key3_Source: (column name)
+   - Prefix_Needed: (Yes/No, specify prefix)
+
+{feedback_context}
+
+**OUTPUT FORMAT:**
+FILE: <filename>
+SHEET: <sheetname>
+Key1: <column or '0'>
+Key2: <column or '0'>
+Key3: <column>
+Prefix: <prefix or 'None'>
+---
+[Repeat for all files/sheets]
+"""
         
-        STRATEGY: {state['strategy']}
-        DATA CONTEXT: {state['dfs_sample_str']}
-        
-        YOUR TASK:
-        Identify the Primary Keys and Foreign Keys that link these files.
-        - Look for exact name matches (e.g., 'id' == 'id')
-        - Look for semantic matches (e.g., 'Employee_ID' == 'Emp_Ref')
-        
-        Output a clear list of mappings.
-        """
+        logger.info("🤖 Calling LLM to identify keys...")
         response = self.llm.invoke(prompt).content
-        return {"identifiers": response}
+        logger.info("✅ Identifier proposal generated")
+        logger.info(f"📋 Proposal length: {len(response)} characters")
+        
+        return {
+            "identifiers": response,
+            "id_retries": retry_count + 1
+        }
+
+    def node_id_evaluator(self, state: AgentState):
+        """Evaluates the identification proposal with a confidence score."""
+        logger.info("⚖️  Evaluating identification proposal...")
+        
+        system_prompt = """You are a SENIOR DATA ARCHITECT with 20 years of experience in data integration projects.
+Your role is to rigorously evaluate identification strategies.
+You are STRICT and will only give high confidence if the proposal is flawless."""
+        
+        evaluation_prompt = f"""
+**EVALUATION TASK:**
+
+Review this identification strategy:
+
+**PROPOSED IDENTIFIERS:**
+{state['identifiers']}
+
+**DATA CONTEXT:**
+{state['dfs_sample_str']}
+
+**EVALUATION CRITERIA:**
+1. **Completeness**: Are ALL files/sheets mapped? (30 points)
+2. **Consistency**: Is the composite key structure uniform? (25 points)
+3. **Collision Prevention**: Will the strategy avoid ID conflicts? (25 points)
+4. **Clarity**: Is the mapping unambiguous and implementable? (20 points)
+
+**SCORING:**
+- 90-100: Perfect, production-ready
+- 70-89: Good but has minor issues
+- 50-69: Needs significant improvement
+- <50: Major flaws, restart required
+
+**OUTPUT (JSON only):**
+{{
+  "confidence_score": <0-100>,
+  "feedback_text": "<Detailed critique with specific issues if score < 90>"
+}}
+"""
+        
+        # Create a combined prompt with system context
+        full_prompt = f"{system_prompt}\n\n{evaluation_prompt}"
+        response = self.llm.invoke(full_prompt).content
+        
+        # Parse JSON response
+        try:
+            # Extract JSON from response (handle markdown code blocks)
+            json_str = response.strip()
+            if "```json" in json_str:
+                json_str = json_str.split("```json")[1].split("```")[0].strip()
+            elif "```" in json_str:
+                json_str = json_str.split("```")[1].split("```")[0].strip()
+            
+            eval_result = json.loads(json_str)
+            confidence = float(eval_result.get("confidence_score", 0))
+            feedback = eval_result.get("feedback_text", "")
+            
+            logger.info(f"📊 Evaluation Score: {confidence}/100")
+            if confidence >= 90:
+                logger.info("✅ Identification approved! Moving to next phase.")
+            else:
+                logger.warning(f"⚠️  Identification needs improvement (Score: {confidence})")
+                logger.warning(f"💬 Feedback: {feedback[:200]}...") if len(feedback) > 200 else logger.warning(f"💬 Feedback: {feedback}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to parse evaluator response: {e}")
+            confidence = 0.0
+            feedback = f"Evaluator response parsing failed: {response}"
+        
+        return {
+            "id_confidence": confidence,
+            "id_feedback": feedback
+        }
+
+    # ============================================================
+    # PHASE 2: SCHEMA LOOP
+    # ============================================================
 
     def node_schema_maker(self, state: AgentState):
-        """Defines the target table structure."""
+        """Defines the target unified table structure."""
+        retry_count = state.get("schema_retries", 0)
+        previous_feedback = state.get("schema_feedback", "")
+        
+        logger.info("="*60)
+        logger.info("📐 PHASE 2: SCHEMA DESIGN")
+        logger.info(f"Attempt #{retry_count + 1}")
+        if previous_feedback:
+            logger.info(f"📝 Addressing feedback from previous attempt")
+        logger.info("="*60)
+        
+        feedback_context = ""
+        if previous_feedback:
+            feedback_context = f"\n**PREVIOUS ATTEMPT FEEDBACK (Retry {retry_count}):**\n{previous_feedback}\n\nYou MUST fix these issues."
+        
         prompt = f"""
-        You are the SCHEMA MAKER.
+You are the SCHEMA ARCHITECT.
+
+**APPROVED IDENTIFIERS:**
+{state['identifiers']}
+
+**DATA CONTEXT:**
+{state['dfs_sample_str']}
+
+**YOUR TASK:**
+Design the final unified master table schema.
+
+**REQUIREMENTS:**
+1. **Standard Key Columns**: Define 3 standardized columns for the composite key:
+   - Example: `STD_KEY1`, `STD_KEY2`, `STD_KEY3`
+   - Specify data type and logic for each.
+
+2. **Master Unique ID**: Define the formula to create a single unique identifier:
+   - Example: `MASTER_UID = STD_KEY1 + "_" + STD_KEY2 + "_" + STD_KEY3`
+
+3. **Value Columns**: List all non-key columns to retain from source files:
+   - Example: Property_Type, Area_SqFt, Construction_Year, Owner, etc.
+   - Specify handling for columns that exist in some files but not others (fill with NULL).
+
+4. **Transformation Rules**:
+   - Data type conversions (e.g., dates, numbers)
+   - Handling missing/null values
+   - Column renaming mappings
+
+{feedback_context}
+
+**OUTPUT FORMAT:**
+# COMPOSITE KEY STRUCTURE
+Key1: <name, type, logic>
+Key2: <name, type, logic>
+Key3: <name, type, logic>
+Master_UID: <formula>
+
+# VALUE COLUMNS
+- Column1: <source mapping, type, null handling>
+- Column2: <source mapping, type, null handling>
+...
+
+# SPECIAL RULES
+- <Any transformations>
+"""
         
-        STRATEGY: {state['strategy']}
-        IDENTIFIED KEYS: {state['identifiers']}
-        DATA CONTEXT: {state['dfs_sample_str']}
-        
-        YOUR TASK:
-        Define the Final Schema for the Unified Master File.
-        List exactly which columns from which files will be included.
-        Resolve naming conflicts (e.g., rename 'Cost' to 'Repair_Cost' and 'Purchase_Cost').
-        """
+        logger.info("🤖 Calling LLM to design schema...")
         response = self.llm.invoke(prompt).content
-        return {"schema": response}
+        logger.info("✅ Schema proposal generated")
+        logger.info(f"📋 Schema length: {len(response)} characters")
+        
+        return {
+            "schema": response,
+            "schema_retries": retry_count + 1
+        }
+
+    def node_schema_evaluator(self, state: AgentState):
+        """Evaluates the schema proposal."""
+        logger.info("⚖️  Evaluating schema design...")
+        
+        system_prompt = """You are a DATABASE SCHEMA EXPERT with expertise in data warehousing and ETL design.
+You are METICULOUS and will reject schemas that lack clarity or have logical flaws."""
+        
+        evaluation_prompt = f"""
+**EVALUATION TASK:**
+
+Review this schema design:
+
+**PROPOSED SCHEMA:**
+{state['schema']}
+
+**APPROVED IDENTIFIERS:**
+{state['identifiers']}
+
+**DATA CONTEXT:**
+{state['dfs_sample_str']}
+
+**EVALUATION CRITERIA:**
+1. **Key Design**: Is the composite key properly defined? (25 points)
+2. **UID Formula**: Is the unique ID formula correct and collision-free? (25 points)
+3. **Column Coverage**: Are all important columns from source data included? (20 points)
+4. **Type Safety**: Are data types and transformations properly specified? (15 points)
+5. **Null Handling**: Is missing data handling clearly defined? (15 points)
+
+**SCORING:**
+- 90-100: Production-ready schema
+- 70-89: Minor improvements needed
+- 50-69: Significant gaps
+- <50: Major redesign required
+
+**OUTPUT (JSON only):**
+{{
+  "confidence_score": <0-100>,
+  "feedback_text": "<Detailed critique with specific issues if score < 90>"
+}}
+"""
+        
+        full_prompt = f"{system_prompt}\n\n{evaluation_prompt}"
+        response = self.llm.invoke(full_prompt).content
+        
+        # Parse JSON response
+        try:
+            json_str = response.strip()
+            if "```json" in json_str:
+                json_str = json_str.split("```json")[1].split("```")[0].strip()
+            elif "```" in json_str:
+                json_str = json_str.split("```")[1].split("```")[0].strip()
+            
+            eval_result = json.loads(json_str)
+            confidence = float(eval_result.get("confidence_score", 0))
+            feedback = eval_result.get("feedback_text", "")
+            
+            logger.info(f"📊 Evaluation Score: {confidence}/100")
+            if confidence >= 90:
+                logger.info("✅ Schema approved! Moving to code generation.")
+            else:
+                logger.warning(f"⚠️  Schema needs improvement (Score: {confidence})")
+                logger.warning(f"💬 Feedback: {feedback[:200]}...") if len(feedback) > 200 else logger.warning(f"💬 Feedback: {feedback}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to parse schema evaluator response: {e}")
+            confidence = 0.0
+            feedback = f"Evaluator response parsing failed: {response}"
+        
+        return {
+            "schema_confidence": confidence,
+            "schema_feedback": feedback
+        }
+
+    # ============================================================
+    # PHASE 3: EXECUTION & RECOVERY
+    # ============================================================
 
     def node_code_generator(self, state: AgentState):
-        """Writes the Python code to perform the merge."""
-        output_path = os.path.join(state['output_folder'], 'master_unified_data.xlsx').replace("\\", "/")
+        """Generates executable Python code based on approved design."""
+        logger.info("="*60)
+        logger.info("💻 PHASE 3: CODE GENERATION")
+        logger.info("="*60)
+        
+        safe_output_path = os.path.join(state['output_folder'], 'master_unified_data.xlsx').replace("\\", "/")
         
         prompt = f"""
-        You are the CODE GENERATOR.
+You are the CODE GENERATOR - a Python expert specializing in pandas data transformation.
+
+**APPROVED DESIGN:**
+
+IDENTIFIERS:
+{state['identifiers']}
+
+SCHEMA:
+{state['schema']}
+
+**SOURCE FILES:**
+{state['file_paths']}
+
+**YOUR TASK:**
+Write complete, executable Python code to perform the unification.
+
+**MANDATORY ALGORITHM:**
+
+```python
+import pandas as pd
+import os
+
+# 1. LOAD ALL DATAFRAMES
+all_dfs = []
+
+# For each file, handle CSV or Excel sheets
+# Store each dataframe with metadata
+
+# 2. NORMALIZE KEYS (CRUCIAL STEP)
+# For EVERY dataframe, create standardized key columns
+# Example:
+#   df['K1'] = df.get('City_Column', '0').astype(str).str.strip()
+#   df['K2'] = df.get('Building_Column', '0').astype(str).str.strip()
+#   df['K3'] = df['Unit_Column'].astype(str).str.strip()
+#
+# Handle NaN: df['K1'].fillna('0', inplace=True)
+# Apply prefixes if needed: df['K3'] = 'PREFIX-' + df['K3']
+
+# 3. CREATE MASTER UNIQUE ID
+#   df['MASTER_UID'] = df['K1'] + '_' + df['K2'] + '_' + df['K3']
+
+# 4. SELECT COLUMNS
+# Keep only: [MASTER_UID, K1, K2, K3, <value columns>]
+
+# 5. MERGE STRATEGY
+# Option A: Stack all entities with pd.concat (if all are masters)
+# Option B: Define one master, merge others with pd.merge on MASTER_UID
+
+# 6. SAVE
+final_df.to_excel('{safe_output_path}', index=False)
+print("SUCCESS: Unified data saved to {safe_output_path}")
+```
+
+**CRITICAL REQUIREMENTS:**
+- Handle missing columns gracefully with .get() or try/except
+- Convert all key columns to string type
+- Fill NaN values before creating composite keys
+- Include error handling for file reading
+- Print clear success message at the end
+
+**OUTPUT:** 
+Return ONLY the Python code, no explanations.
+"""
         
-        Final Schema Plan: {state['schema']}
-        Identifiers: {state['identifiers']}
-        File Paths: {state['file_paths']}
+        logger.info("🤖 Calling LLM to generate Python code...")
+        response = self.llm.invoke(prompt).content.strip()
         
-        YOUR TASK:
-        Write a robust Python script to:
-        1. Load the files specified in 'File Paths' using pandas.
-        2. Perform the merges/joins as described in the Schema Plan.
-        3. Handle missing values (NaN) gracefully.
-        4. Save the final dataframe to: '{output_path}'
+        # Clean code blocks
+        code = response.replace("```python", "").replace("```", "").strip()
         
-        IMPORTANT:
-        - Return ONLY the Python code. 
-        - Do not use markdown blocks like ```python. Just the code.
-        - Ensure you import pandas as pd.
-        """
-        code = self.llm.invoke(prompt).content.strip().replace("```python", "").replace("```", "")
+        logger.info("✅ Code generated successfully")
+        logger.info(f"📋 Code length: {len(code)} characters, {code.count('def')} functions")
+        
         return {"final_code": code}
 
     def node_executor(self, state: AgentState):
-        """Executes the generated code."""
+        """Executes the generated code with error analysis."""
         code = state['final_code']
+        exec_retries = state.get("execution_retries", 0)
+        
+        logger.info("="*60)
+        logger.info("⚡ EXECUTING GENERATED CODE")
+        logger.info(f"Execution attempt #{exec_retries + 1}")
+        logger.info("="*60)
+        
         try:
-            # Dangerous execution - in prod use a sandbox
+            logger.info("🔄 Running Python code...")
+            # Execute in isolated namespace
             exec_globals = {}
             exec(code, exec_globals)
-            return {"execution_result": "SUCCESS"}
+            
+            # Verify output file exists
+            output_path = os.path.join(state['output_folder'], 'master_unified_data.xlsx')
+            if os.path.exists(output_path):
+                file_size = os.path.getsize(output_path) / 1024  # KB
+                logger.info(f"✅ Code executed successfully!")
+                logger.info(f"📁 Output file created: master_unified_data.xlsx ({file_size:.2f} KB)")
+                return {
+                    "execution_result": "SUCCESS",
+                    "execution_error": "",
+                    "execution_retries": exec_retries + 1
+                }
+            else:
+                logger.error("❌ Code executed but output file not created")
+                return {
+                    "execution_result": "FAILED",
+                    "execution_error": "Code executed but output file not created",
+                    "execution_retries": exec_retries + 1
+                }
+                
         except Exception as e:
-            logger.error(f"Execution Error: {e}")
-            return {"execution_result": f"FAILED: {str(e)}"}
+            error_msg = str(e)
+            logger.error(f"❌ Execution Error: {error_msg}")
+            
+            # Analyze error type
+            data_errors = ['KeyError', 'MergeError', 'Column', 'key', 'merge', 'index']
+            is_data_error = any(keyword.lower() in error_msg.lower() for keyword in data_errors)
+            
+            if is_data_error:
+                logger.error("🔍 Error Type: DATA STRUCTURE ISSUE (will retry identification)")
+            else:
+                logger.error("🔍 Error Type: CODE SYNTAX/LOGIC ISSUE (will regenerate code)")
+            
+            return {
+                "execution_result": "FAILED",
+                "execution_error": error_msg,
+                "execution_retries": exec_retries + 1,
+                "error_is_data_related": is_data_error
+            }
 
-    # --- GRAPH BUILDER ---
+    # ============================================================
+    # GRAPH BUILDER
+    # ============================================================
+    
     def _build_graph(self):
         workflow = StateGraph(AgentState)
         
-        # Add Nodes
-        workflow.add_node("strategy_maker", self.node_strategy_maker)
+        # Add all nodes
         workflow.add_node("identifier", self.node_identifier)
+        workflow.add_node("id_evaluator", self.node_id_evaluator)
         workflow.add_node("schema_maker", self.node_schema_maker)
+        workflow.add_node("schema_evaluator", self.node_schema_evaluator)
         workflow.add_node("code_generator", self.node_code_generator)
         workflow.add_node("executor", self.node_executor)
         
-        # Define Edges
-        workflow.set_entry_point("strategy_maker")
+        # Entry point
+        workflow.set_entry_point("identifier")
         
-        # Conditional Logic: Loop or Finish
-        def check_satisfaction(state):
-            if state["is_satisfied"]:
-                return "code_generator"
+        # Phase 1: Identification Loop
+        workflow.add_edge("identifier", "id_evaluator")
+        
+        def route_after_id_eval(state):
+            """Route based on ID confidence and retries."""
+            confidence = state.get("id_confidence", 0)
+            retries = state.get("id_retries", 0)
+            
+            if confidence >= 90 or retries >= 3:
+                logger.info("")
+                logger.info("🎯 PHASE 1 COMPLETE: Proceeding to Schema Design")
+                logger.info(f"   Final confidence: {confidence}/100, Total attempts: {retries}")
+                logger.info("")
+                return "schema_maker"
             else:
+                logger.info("")
+                logger.info(f"🔄 PHASE 1 RETRY: Attempt {retries} - Score {confidence}/100 (Need 90+)")
+                logger.info("")
                 return "identifier"
-
+        
         workflow.add_conditional_edges(
-            "strategy_maker",
-            check_satisfaction,
+            "id_evaluator",
+            route_after_id_eval,
             {
-                "code_generator": "code_generator",
+                "schema_maker": "schema_maker",
                 "identifier": "identifier"
             }
         )
         
-        workflow.add_edge("identifier", "schema_maker")
-        workflow.add_edge("schema_maker", "strategy_maker") # Loop back to check
+        # Phase 2: Schema Loop
+        workflow.add_edge("schema_maker", "schema_evaluator")
+        
+        def route_after_schema_eval(state):
+            """Route based on schema confidence and retries."""
+            confidence = state.get("schema_confidence", 0)
+            retries = state.get("schema_retries", 0)
+            
+            if confidence >= 90 or retries >= 3:
+                logger.info("")
+                logger.info("🎯 PHASE 2 COMPLETE: Proceeding to Code Generation")
+                logger.info(f"   Final confidence: {confidence}/100, Total attempts: {retries}")
+                logger.info("")
+                return "code_generator"
+            else:
+                logger.info("")
+                logger.info(f"🔄 PHASE 2 RETRY: Attempt {retries} - Score {confidence}/100 (Need 90+)")
+                logger.info("")
+                return "schema_maker"
+        
+        workflow.add_conditional_edges(
+            "schema_evaluator",
+            route_after_schema_eval,
+            {
+                "code_generator": "code_generator",
+                "schema_maker": "schema_maker"
+            }
+        )
+        
+        # Phase 3: Execution & Recovery
         workflow.add_edge("code_generator", "executor")
-        workflow.add_edge("executor", END)
+        
+        def route_after_execution(state):
+            """Smart error recovery based on error type."""
+            result = state.get("execution_result", "")
+            retries = state.get("execution_retries", 0)
+            error = state.get("execution_error", "")
+            is_data_error = state.get("error_is_data_related", False)
+            
+            if result == "SUCCESS":
+                logger.info("")
+                logger.info("🎉 " + "="*50)
+                logger.info("🎉 ALL PHASES COMPLETE - UNIFICATION SUCCESSFUL!")
+                logger.info("🎉 " + "="*50)
+                logger.info("")
+                return "end"
+            
+            # Safety: prevent infinite loops
+            if retries >= 3:
+                logger.error("")
+                logger.error("⛔ MAX RETRIES REACHED - STOPPING EXECUTION")
+                logger.error(f"   Total execution attempts: {retries}")
+                logger.error("")
+                return "end"
+            
+            # Analyze error type for smart recovery
+            if is_data_error:
+                logger.warning("")
+                logger.warning("🔄 RECOVERY MODE: Data structure error detected")
+                logger.warning("   → Resetting to PHASE 1 (Identification) for fresh analysis")
+                logger.warning("")
+                # Reset retry counters for fresh analysis
+                state["id_retries"] = 0
+                state["id_feedback"] = f"CODE EXECUTION FAILED with data error: {error}\n\nRethink the identification strategy."
+                return "identifier"
+            else:
+                logger.warning("")
+                logger.warning("🔄 RECOVERY MODE: Code syntax/logic error detected")
+                logger.warning("   → Regenerating code with corrected logic")
+                logger.warning("")
+                return "code_generator"
+        
+        workflow.add_conditional_edges(
+            "executor",
+            route_after_execution,
+            {
+                "end": END,
+                "identifier": "identifier",
+                "code_generator": "code_generator"
+            }
+        )
         
         return workflow.compile()
 
+    # ============================================================
+    # MAIN ENTRY POINT
+    # ============================================================
+    
     def run(self, file_paths, output_folder):
-        """Main entry point."""
-        # 1. Prepare Context
+        """Main entry point for the agent."""
+        logger.info("")
+        logger.info("🚀 " + "="*55)
+        logger.info("🚀 MULTI-STAGE REFLEXION AGENT - STARTING")
+        logger.info("🚀 " + "="*55)
+        logger.info("")
+        logger.info(f"📂 Files to process: {len(file_paths)}")
+        for i, path in enumerate(file_paths, 1):
+            logger.info(f"   {i}. {os.path.basename(path)}")
+        logger.info("")
+        
         samples = self._load_samples(file_paths)
         
-        # 2. Initialize State
+        # Initialize complete state
         initial_state = {
             "file_paths": file_paths,
             "dfs_sample_str": samples,
             "output_folder": output_folder,
-            "iteration": 0,
-            "schema": "None yet",
-            "is_satisfied": False
+            
+            # Phase 1 state
+            "identifiers": "",
+            "id_feedback": "",
+            "id_confidence": 0.0,
+            "id_retries": 0,
+            
+            # Phase 2 state
+            "schema": "",
+            "schema_feedback": "",
+            "schema_confidence": 0.0,
+            "schema_retries": 0,
+            
+            # Phase 3 state
+            "final_code": "",
+            "execution_result": "",
+            "execution_error": "",
+            "execution_retries": 0
         }
         
-        # 3. Run Graph
+        logger.info("🎬 Graph execution starting...")
+        logger.info("")
+        
         final_state = self.graph.invoke(initial_state)
         
-        # 4. Check Result
+        logger.info("")
+        logger.info("📊 FINAL STATISTICS:")
+        logger.info(f"   Phase 1 (Identification) attempts: {final_state.get('id_retries', 0)}")
+        logger.info(f"   Phase 2 (Schema) attempts: {final_state.get('schema_retries', 0)}")
+        logger.info(f"   Phase 3 (Execution) attempts: {final_state.get('execution_retries', 0)}")
+        logger.info("")
+        
         if final_state["execution_result"] == "SUCCESS":
+            logger.info("✅ " + "="*55)
+            logger.info("✅ UNIFICATION COMPLETED SUCCESSFULLY!")
+            logger.info("✅ " + "="*55)
+            logger.info("")
             return True, "master_unified_data.xlsx"
         else:
-            return False, final_state["execution_result"]
+            error_msg = final_state.get("execution_error", "Unknown error")
+            logger.error("❌ " + "="*55)
+            logger.error("❌ UNIFICATION FAILED")
+            logger.error(f"❌ Error: {error_msg}")
+            logger.error("❌ " + "="*55)
+            logger.error("")
+            return False, error_msg
