@@ -95,43 +95,25 @@ class UnificationGraphAgent:
         if previous_feedback:
             feedback_context = f"\n**PREVIOUS ATTEMPT FEEDBACK (Retry {retry_count}):**\n{previous_feedback}\n\nYou MUST address these concerns in your new proposal."
         
-        prompt = f"""
-You are the IDENTIFIER - an expert in relational database design.
+        prompt = f"""You are a relational database expert. Analyze the data and identify linking keys for unification.
 
-**DATA CONTEXT:**
+DATA CONTEXT:
 {state['dfs_sample_str']}
 
-**YOUR TASK:**
-Analyze ALL files/sheets and identify the linking keys (single or composite) that will enable unification.
-
-**CRITICAL REQUIREMENTS:**
-1. **Identify the Max Key Dimension**: Find which entity has the MOST identifiers.
-   Example: If "Flats" has (City, Building, Flat_No) = 3 keys, this becomes the master structure.
-   
-2. **Map ALL Entities to This Structure**: For simpler entities:
-   - If "Houses" only has (House_ID), map it as: Key1='0', Key2='0', Key3=House_ID
-   - Explain the constant padding strategy clearly.
-   
-3. **Handle ID Conflicts**: If different entity types might have overlapping IDs:
-   - Propose a prefix strategy (e.g., 'F-' for Flats, 'H-' for Houses).
-   
-4. **Be Specific**: For EACH file/sheet, output:
-   - Key1_Source: (column name OR '0')
-   - Key2_Source: (column name OR '0')  
-   - Key3_Source: (column name)
-   - Prefix_Needed: (Yes/No, specify prefix)
+TASK:
+1. Identify the entity with the MAXIMUM number of identifier columns - this defines your composite key structure dimensions
+2. For entities with fewer identifiers, map them to this structure using constant padding (e.g., '0' or 'NA')
+3. If different entity types might have overlapping ID values, propose a prefix strategy to prevent collisions
+4. Be specific about which source column maps to which key position for every file/sheet
 
 {feedback_context}
 
-**OUTPUT FORMAT:**
+OUTPUT FORMAT (for EACH file/sheet):
 FILE: <filename>
-SHEET: <sheetname>
-Key1: <column or '0'>
-Key2: <column or '0'>
-Key3: <column>
-Prefix: <prefix or 'None'>
+SHEET: <sheet>
+Key_Mappings: <describe how source columns map to the composite key structure>
+Prefix: <prefix if needed, or 'None'>
 ---
-[Repeat for all files/sheets]
 """
         
         logger.info("🤖 Calling LLM to identify keys...")
@@ -148,37 +130,28 @@ Prefix: <prefix or 'None'>
         """Evaluates the identification proposal with a confidence score."""
         logger.info("⚖️  Evaluating identification proposal...")
         
-        system_prompt = """You are a SENIOR DATA ARCHITECT with 20 years of experience in data integration projects.
-Your role is to rigorously evaluate identification strategies.
-You are STRICT and will only give high confidence if the proposal is flawless."""
+        system_prompt = """You are a Senior Data Architect. Evaluate identification strategies with strict standards. Only give high confidence (90+) if flawless."""
         
-        evaluation_prompt = f"""
-**EVALUATION TASK:**
+        evaluation_prompt = f"""Evaluate this identification strategy:
 
-Review this identification strategy:
-
-**PROPOSED IDENTIFIERS:**
+PROPOSED IDENTIFIERS:
 {state['identifiers']}
 
-**DATA CONTEXT:**
+DATA:
 {state['dfs_sample_str']}
 
-**EVALUATION CRITERIA:**
-1. **Completeness**: Are ALL files/sheets mapped? (30 points)
-2. **Consistency**: Is the composite key structure uniform? (25 points)
-3. **Collision Prevention**: Will the strategy avoid ID conflicts? (25 points)
-4. **Clarity**: Is the mapping unambiguous and implementable? (20 points)
+CRITERIA (Total 100 points):
+1. Completeness: All files/sheets mapped? (30 pts)
+2. Consistency: Uniform composite key structure? (25 pts)
+3. Collision Prevention: No ID conflicts? (25 pts)
+4. Clarity: Unambiguous and implementable? (20 pts)
 
-**SCORING:**
-- 90-100: Perfect, production-ready
-- 70-89: Good but has minor issues
-- 50-69: Needs significant improvement
-- <50: Major flaws, restart required
+SCORING: 90-100=Production ready, 70-89=Minor issues, 50-69=Needs work, <50=Major flaws
 
-**OUTPUT (JSON only):**
+OUTPUT (JSON only):
 {{
   "confidence_score": <0-100>,
-  "feedback_text": "<Detailed critique with specific issues if score < 90>"
+  "feedback_text": "<Specific issues if score < 90>"
 }}
 """
         
@@ -236,51 +209,32 @@ Review this identification strategy:
         if previous_feedback:
             feedback_context = f"\n**PREVIOUS ATTEMPT FEEDBACK (Retry {retry_count}):**\n{previous_feedback}\n\nYou MUST fix these issues."
         
-        prompt = f"""
-You are the SCHEMA ARCHITECT.
+        prompt = f"""You are a Schema Architect. Design the unified master table schema.
 
-**APPROVED IDENTIFIERS:**
+APPROVED IDENTIFIERS:
 {state['identifiers']}
 
-**DATA CONTEXT:**
+DATA:
 {state['dfs_sample_str']}
 
-**YOUR TASK:**
-Design the final unified master table schema.
-
-**REQUIREMENTS:**
-1. **Standard Key Columns**: Define 3 standardized columns for the composite key:
-   - Example: `STD_KEY1`, `STD_KEY2`, `STD_KEY3`
-   - Specify data type and logic for each.
-
-2. **Master Unique ID**: Define the formula to create a single unique identifier:
-   - Example: `MASTER_UID = STD_KEY1 + "_" + STD_KEY2 + "_" + STD_KEY3`
-
-3. **Value Columns**: List all non-key columns to retain from source files:
-   - Example: Property_Type, Area_SqFt, Construction_Year, Owner, etc.
-   - Specify handling for columns that exist in some files but not others (fill with NULL).
-
-4. **Transformation Rules**:
-   - Data type conversions (e.g., dates, numbers)
-   - Handling missing/null values
-   - Column renaming mappings
+REQUIREMENTS:
+1. Define standardized key columns based on the composite key structure identified (name, type, logic for each)
+2. Define Master Unique ID formula that concatenates all key columns with delimiter
+3. List all value columns to retain from source files with null handling strategy
+4. Specify data type conversions and transformations needed
 
 {feedback_context}
 
-**OUTPUT FORMAT:**
+OUTPUT FORMAT:
 # COMPOSITE KEY STRUCTURE
-Key1: <name, type, logic>
-Key2: <name, type, logic>
-Key3: <name, type, logic>
-Master_UID: <formula>
+<List each key column with name, type, and logic>
+Master_UID: <formula using identified keys>
 
 # VALUE COLUMNS
-- Column1: <source mapping, type, null handling>
-- Column2: <source mapping, type, null handling>
-...
+- <column>: <source mapping, type, null handling>
 
-# SPECIAL RULES
-- <Any transformations>
+# TRANSFORMATIONS
+- <any special rules>
 """
         
         logger.info("🤖 Calling LLM to design schema...")
@@ -297,40 +251,32 @@ Master_UID: <formula>
         """Evaluates the schema proposal."""
         logger.info("⚖️  Evaluating schema design...")
         
-        system_prompt = """You are a DATABASE SCHEMA EXPERT with expertise in data warehousing and ETL design.
-You are METICULOUS and will reject schemas that lack clarity or have logical flaws."""
+        system_prompt = """You are a Database Schema Expert. Evaluate schemas with strict ETL standards. Reject schemas lacking clarity or with logical flaws."""
         
-        evaluation_prompt = f"""
-**EVALUATION TASK:**
+        evaluation_prompt = f"""Evaluate this schema design:
 
-Review this schema design:
-
-**PROPOSED SCHEMA:**
+PROPOSED SCHEMA:
 {state['schema']}
 
-**APPROVED IDENTIFIERS:**
+IDENTIFIERS:
 {state['identifiers']}
 
-**DATA CONTEXT:**
+DATA:
 {state['dfs_sample_str']}
 
-**EVALUATION CRITERIA:**
-1. **Key Design**: Is the composite key properly defined? (25 points)
-2. **UID Formula**: Is the unique ID formula correct and collision-free? (25 points)
-3. **Column Coverage**: Are all important columns from source data included? (20 points)
-4. **Type Safety**: Are data types and transformations properly specified? (15 points)
-5. **Null Handling**: Is missing data handling clearly defined? (15 points)
+CRITERIA (Total 100 points):
+1. Key Design: Composite key properly defined? (25 pts)
+2. UID Formula: Correct and collision-free? (25 pts)
+3. Column Coverage: All important columns included? (20 pts)
+4. Type Safety: Data types/transformations specified? (15 pts)
+5. Null Handling: Missing data strategy clear? (15 pts)
 
-**SCORING:**
-- 90-100: Production-ready schema
-- 70-89: Minor improvements needed
-- 50-69: Significant gaps
-- <50: Major redesign required
+SCORING: 90-100=Production ready, 70-89=Minor improvements, 50-69=Gaps, <50=Redesign
 
-**OUTPUT (JSON only):**
+OUTPUT (JSON only):
 {{
   "confidence_score": <0-100>,
-  "feedback_text": "<Detailed critique with specific issues if score < 90>"
+  "feedback_text": "<Specific issues if score < 90>"
 }}
 """
         
@@ -378,10 +324,7 @@ Review this schema design:
         
         safe_output_path = os.path.join(state['output_folder'], 'master_unified_data.xlsx').replace("\\", "/")
         
-        prompt = f"""
-You are the CODE GENERATOR - a Python expert specializing in pandas data transformation.
-
-**APPROVED DESIGN:**
+        prompt = f"""Generate Python code to unify the data based on approved design.
 
 IDENTIFIERS:
 {state['identifiers']}
@@ -389,58 +332,29 @@ IDENTIFIERS:
 SCHEMA:
 {state['schema']}
 
-**SOURCE FILES:**
+FILES:
 {state['file_paths']}
 
-**YOUR TASK:**
-Write complete, executable Python code to perform the unification.
+ALGORITHM:
+1. Load all dataframes (handle CSV/Excel, iterate through sheets)
+2. Normalize keys: Create standardized key columns for each dataframe
+   - Use .get() for optional columns, fill with constant (e.g., '0') if missing
+   - Convert all keys to string: .astype(str).str.strip()
+   - Fill NaN values: .fillna('<constant>', inplace=True)
+   - Apply prefixes if specified in the identifier mapping
+3. Create MASTER_UID: Concatenate all key columns with '_' delimiter
+4. Select columns: Keep [MASTER_UID, key_columns, value_columns]
+5. Merge strategy: Use pd.concat() to stack OR pd.merge() on MASTER_UID based on data relationships
+6. Save: final_df.to_excel('{safe_output_path}', index=False)
 
-**MANDATORY ALGORITHM:**
+REQUIREMENTS:
+- Handle missing columns gracefully (use .get() or try/except)
+- Convert all keys to string before concatenation
+- Ensure no data loss during merging
+- Include error handling for file operations
+- Print "SUCCESS: Unified data saved" at the end
 
-```python
-import pandas as pd
-import os
-
-# 1. LOAD ALL DATAFRAMES
-all_dfs = []
-
-# For each file, handle CSV or Excel sheets
-# Store each dataframe with metadata
-
-# 2. NORMALIZE KEYS (CRUCIAL STEP)
-# For EVERY dataframe, create standardized key columns
-# Example:
-#   df['K1'] = df.get('City_Column', '0').astype(str).str.strip()
-#   df['K2'] = df.get('Building_Column', '0').astype(str).str.strip()
-#   df['K3'] = df['Unit_Column'].astype(str).str.strip()
-#
-# Handle NaN: df['K1'].fillna('0', inplace=True)
-# Apply prefixes if needed: df['K3'] = 'PREFIX-' + df['K3']
-
-# 3. CREATE MASTER UNIQUE ID
-#   df['MASTER_UID'] = df['K1'] + '_' + df['K2'] + '_' + df['K3']
-
-# 4. SELECT COLUMNS
-# Keep only: [MASTER_UID, K1, K2, K3, <value columns>]
-
-# 5. MERGE STRATEGY
-# Option A: Stack all entities with pd.concat (if all are masters)
-# Option B: Define one master, merge others with pd.merge on MASTER_UID
-
-# 6. SAVE
-final_df.to_excel('{safe_output_path}', index=False)
-print("SUCCESS: Unified data saved to {safe_output_path}")
-```
-
-**CRITICAL REQUIREMENTS:**
-- Handle missing columns gracefully with .get() or try/except
-- Convert all key columns to string type
-- Fill NaN values before creating composite keys
-- Include error handling for file reading
-- Print clear success message at the end
-
-**OUTPUT:** 
-Return ONLY the Python code, no explanations.
+OUTPUT: Python code only, no explanations.
 """
         
         logger.info("🤖 Calling LLM to generate Python code...")
