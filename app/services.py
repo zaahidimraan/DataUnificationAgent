@@ -335,24 +335,38 @@ SCHEMA:
 FILES:
 {state['file_paths']}
 
-ALGORITHM:
+CRITICAL: Analyze data relationships first. Determine if single-file merge is appropriate.
+
+DECISION CRITERIA:
+- Single File: If all data shares same granularity (one-to-one relationships)
+- Multiple Files: If data has different granularities (one-to-many, many-to-many relationships)
+
+IF SINGLE FILE IS POSSIBLE:
 1. Load all dataframes (handle CSV/Excel, iterate through sheets)
 2. Normalize keys: Create standardized key columns for each dataframe
-   - Use .get() for optional columns, fill with constant (e.g., '0') if missing
+   - Use .get() for optional columns, fill with constant if missing
    - Convert all keys to string: .astype(str).str.strip()
    - Fill NaN values: .fillna('<constant>', inplace=True)
-   - Apply prefixes if specified in the identifier mapping
+   - Apply prefixes if specified
 3. Create MASTER_UID: Concatenate all key columns with '_' delimiter
 4. Select columns: Keep [MASTER_UID, key_columns, value_columns]
-5. Merge strategy: Use pd.concat() to stack OR pd.merge() on MASTER_UID based on data relationships
+5. Merge: Use pd.concat() to stack OR pd.merge() on MASTER_UID
 6. Save: final_df.to_excel('{safe_output_path}', index=False)
+7. Print "SUCCESS: Unified data saved to master_unified_data.xlsx"
+
+IF SINGLE FILE IS IMPOSSIBLE (Different Granularities):
+1. Create normalized structure with multiple related tables
+2. Save as: master.xlsx, transactions.xlsx, details.xlsx, etc. in same output folder
+3. Create a relationships.txt file explaining the schema and foreign keys
+4. Print "SUCCESS: Data normalized into multiple files due to complex relationships. See relationships.txt for schema."
 
 REQUIREMENTS:
-- Handle missing columns gracefully (use .get() or try/except)
-- Convert all keys to string before concatenation
-- Ensure no data loss during merging
-- Include error handling for file operations
-- Print "SUCCESS: Unified data saved" at the end
+- Detect data granularity conflicts (e.g., master records vs transaction history)
+- Handle missing columns gracefully
+- Convert all keys to string before operations
+- Ensure no data loss
+- Include error handling
+- Be explicit about single vs multi-file output
 
 OUTPUT: Python code only, no explanations.
 """
@@ -382,12 +396,23 @@ OUTPUT: Python code only, no explanations.
             logger.info("🔄 Running Python code...")
             # Execute in isolated namespace
             exec_globals = {}
+            
+            # Get initial files in output folder
+            output_folder = state['output_folder']
+            files_before = set(os.listdir(output_folder)) if os.path.exists(output_folder) else set()
+            
             exec(code, exec_globals)
             
-            # Verify output file exists
-            output_path = os.path.join(state['output_folder'], 'master_unified_data.xlsx')
-            if os.path.exists(output_path):
-                file_size = os.path.getsize(output_path) / 1024  # KB
+            # Check what files were created
+            files_after = set(os.listdir(output_folder)) if os.path.exists(output_folder) else set()
+            new_files = files_after - files_before
+            
+            # Check for standard output file OR any new files created
+            standard_output = os.path.join(output_folder, 'master_unified_data.xlsx')
+            
+            if os.path.exists(standard_output):
+                # Single file merge case
+                file_size = os.path.getsize(standard_output) / 1024  # KB
                 logger.info(f"✅ Code executed successfully!")
                 logger.info(f"📁 Output file created: master_unified_data.xlsx ({file_size:.2f} KB)")
                 return {
@@ -395,11 +420,39 @@ OUTPUT: Python code only, no explanations.
                     "execution_error": "",
                     "execution_retries": exec_retries + 1
                 }
+            elif new_files:
+                # Multiple files case (normalized structure)
+                logger.info(f"✅ Code executed successfully!")
+                logger.info(f"📁 Output files created: {len(new_files)} files")
+                for f in sorted(new_files):
+                    file_path = os.path.join(output_folder, f)
+                    file_size = os.path.getsize(file_path) / 1024
+                    logger.info(f"   - {f} ({file_size:.2f} KB)")
+                
+                # Create a summary file listing for download
+                summary_path = os.path.join(output_folder, 'OUTPUT_SUMMARY.txt')
+                with open(summary_path, 'w', encoding='utf-8') as sf:
+                    sf.write("DATA UNIFICATION RESULTS\n")
+                    sf.write("=" * 50 + "\n\n")
+                    sf.write(f"Total files generated: {len(new_files)}\n\n")
+                    sf.write("Files:\n")
+                    for f in sorted(new_files):
+                        sf.write(f"  - {f}\n")
+                    sf.write("\n")
+                    if 'relationships.txt' in new_files:
+                        sf.write("⚠️  Data was split into multiple files due to complex relationships.\n")
+                        sf.write("    See 'relationships.txt' for schema details.\n")
+                
+                return {
+                    "execution_result": "SUCCESS",
+                    "execution_error": "",
+                    "execution_retries": exec_retries + 1
+                }
             else:
-                logger.error("❌ Code executed but output file not created")
+                logger.error("❌ Code executed but no output files created")
                 return {
                     "execution_result": "FAILED",
-                    "execution_error": "Code executed but output file not created",
+                    "execution_error": "Code executed but no output files created",
                     "execution_retries": exec_retries + 1
                 }
                 

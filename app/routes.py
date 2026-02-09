@@ -59,8 +59,30 @@ def process_files():
         success, result = agent.run(saved_paths, output_dir)
         
         if success:
-            flash("✅ Agent Strategy Complete. File Generated.", "success")
-            return render_template('index.html', download_file=result)
+            # Check if single file or multiple files were generated
+            output_files = [f for f in os.listdir(output_dir) if os.path.isfile(os.path.join(output_dir, f))]
+            
+            if 'master_unified_data.xlsx' in output_files:
+                # Single file case
+                flash("✅ Data unified successfully into single file.", "success")
+                return render_template('index.html', download_file='master_unified_data.xlsx', single_file=True)
+            elif len(output_files) > 1:
+                # Multiple files case - create a zip
+                import zipfile
+                zip_path = os.path.join(output_dir, 'unified_data_output.zip')
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for file in output_files:
+                        file_path = os.path.join(output_dir, file)
+                        zipf.write(file_path, arcname=file)
+                
+                flash("✅ Data processed. Multiple files generated (complex relationships detected).", "warning")
+                return render_template('index.html', 
+                                     download_file='unified_data_output.zip', 
+                                     single_file=False,
+                                     file_count=len(output_files))
+            else:
+                flash("✅ Processing complete. Check output folder.", "success")
+                return render_template('index.html')
         else:
             flash(f"❌ Processing Error: {result}", "danger")
             
