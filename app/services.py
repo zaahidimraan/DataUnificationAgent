@@ -20,6 +20,7 @@ class AgentState(TypedDict):
     id_feedback: str
     id_confidence: float
     id_retries: int
+    has_one_to_many: bool  # NEW: Flag for one-to-many detection
     
     # Phase 2: Schema State
     schema: str
@@ -101,19 +102,28 @@ DATA CONTEXT:
 {state['dfs_sample_str']}
 
 TASK:
-1. Identify the entity with the MAXIMUM number of identifier columns - this defines your composite key structure dimensions
-2. For entities with fewer identifiers, map them to this structure using constant padding (e.g., '0' or 'NA')
-3. If different entity types might have overlapping ID values, propose a prefix strategy to prevent collisions
-4. Be specific about which source column maps to which key position for every file/sheet
+1. Analyze data granularity for EACH file/sheet:
+   - Is it master/reference data? (one record per entity)
+   - Is it transaction/detail data? (multiple records per entity - e.g., history, events, logs)
+2. Identify the entity with the MAXIMUM number of identifier columns - this defines your composite key structure dimensions
+3. For entities with fewer identifiers, map them to this structure using constant padding (e.g., '0' or 'NA')
+4. If different entity types might have overlapping ID values, propose a prefix strategy to prevent collisions
+5. IMPORTANT: Note which datasets have one-to-many relationships (e.g., one property → many repairs)
+6. Be specific about which source column maps to which key position for every file/sheet
 
 {feedback_context}
 
 OUTPUT FORMAT (for EACH file/sheet):
 FILE: <filename>
 SHEET: <sheet>
+Granularity: <MASTER (one per entity) OR DETAIL (many per entity, e.g., transaction history)>
 Key_Mappings: <describe how source columns map to the composite key structure>
 Prefix: <prefix if needed, or 'None'>
 ---
+
+SUMMARY:
+- List which files are MASTER level
+- List which files are DETAIL level (one-to-many relationships)
 """
         
         logger.info("🤖 Calling LLM to identify keys...")
@@ -121,16 +131,28 @@ Prefix: <prefix if needed, or 'None'>
         logger.info("✅ Identifier proposal generated")
         logger.info(f"📋 Proposal length: {len(response)} characters")
         
+        # Detect if one-to-many relationships exist
+        has_one_to_many = False
+        one_to_many_indicators = [
+            'DETAIL', 'detail', 'transaction', 'history', 'many per entity', 
+            'multiple records per', 'one-to-many', 'time-series', 'events', 'logs'
+        ]
+        
+        if any(indicator in response for indicator in one_to_many_indicators):
+            has_one_to_many = True
+            logger.warning("⚠️  ONE-TO-MANY relationship detected in data structure")
+        
         return {
             "identifiers": response,
-            "id_retries": retry_count + 1
+            "id_retries": retry_count + 1,
+            "has_one_to_many": has_one_to_many
         }
 
     def node_id_evaluator(self, state: AgentState):
         """Evaluates the identification proposal with a confidence score."""
         logger.info("⚖️  Evaluating identification proposal...")
         
-        system_prompt = """You are a Senior Data Architect. Evaluate identification strategies with strict standards. Only give high confidence (90+) if flawless."""
+        system_prompt = """You are a Senior Data Architect. Evaluate identification strategies with strict standards. Only give high confidence (90+) if flawless. CRITICAL: Ensure proper granularity analysis (master vs detail)."""
         
         evaluation_prompt = f"""Evaluate this identification strategy:
 
@@ -141,17 +163,23 @@ DATA:
 {state['dfs_sample_str']}
 
 CRITERIA (Total 100 points):
-1. Completeness: All files/sheets mapped? (30 pts)
-2. Consistency: Uniform composite key structure? (25 pts)
-3. Collision Prevention: No ID conflicts? (25 pts)
-4. Clarity: Unambiguous and implementable? (20 pts)
+1. Completeness: All files/sheets mapped? (25 pts)
+2. Consistency: Uniform composite key structure? (20 pts)
+3. Collision Prevention: No ID conflicts? (20 pts)
+4. Clarity: Unambiguous and implementable? (15 pts)
+5. GRANULARITY ANALYSIS: Properly identifies master vs detail (one-to-many) data? (20 pts)
+
+CRITICAL CHECK - Granularity:
+- Does proposal distinguish between master data (one per entity) and detail data (many per entity)?
+- Are one-to-many relationships identified (e.g., one customer → many orders)?
+- If no granularity analysis present, score MUST be < 70
 
 SCORING: 90-100=Production ready, 70-89=Minor issues, 50-69=Needs work, <50=Major flaws
 
 OUTPUT (JSON only):
 {{
   "confidence_score": <0-100>,
-  "feedback_text": "<Specific issues if score < 90>"
+  "feedback_text": "<Specific issues if score < 90. If missing granularity analysis, request it explicitly>"
 }}
 """
         
@@ -217,15 +245,28 @@ APPROVED IDENTIFIERS:
 DATA:
 {state['dfs_sample_str']}
 
+CRITICAL - ONE-TO-MANY PRESERVATION:
+- If source data has multiple records per entity (transaction history, time-series, event logs), you MUST preserve all records
+- DO NOT suggest deduplication, groupby().first(), or selecting "latest record only"
+- For one-to-many data: Either create multi-file normalized structure OR ensure single file preserves all detail records
+
 REQUIREMENTS:
-1. Define standardized key columns based on the composite key structure identified (name, type, logic for each)
-2. Define Master Unique ID formula that concatenates all key columns with delimiter
-3. List all value columns to retain from source files with null handling strategy
-4. Specify data type conversions and transformations needed
+1. Analyze data granularity: Are all datasets at same level (one-to-one) or different levels (one-to-many)?
+2. Define standardized key columns based on the composite key structure identified (name, type, logic for each)
+3. Define Master Unique ID formula that concatenates all key columns with delimiter
+4. List all value columns to retain from source files with null handling strategy
+5. Specify if single-file merge is possible or multi-file output required (based on granularity)
+6. If multi-file: Explicitly state which files go into master vs detail tables
 
 {feedback_context}
 
 OUTPUT FORMAT:
+# DATA GRANULARITY ANALYSIS
+<State if all files have same granularity OR list which files are master vs detail>
+
+# MERGE STRATEGY
+<Single file OR Multi-file with explanation>
+
 # COMPOSITE KEY STRUCTURE
 <List each key column with name, type, and logic>
 Master_UID: <formula using identified keys>
@@ -235,6 +276,9 @@ Master_UID: <formula using identified keys>
 
 # TRANSFORMATIONS
 - <any special rules>
+
+# CARDINALITY
+<Confirm one-to-one OR preserve one-to-many>
 """
         
         logger.info("🤖 Calling LLM to design schema...")
@@ -251,7 +295,7 @@ Master_UID: <formula using identified keys>
         """Evaluates the schema proposal."""
         logger.info("⚖️  Evaluating schema design...")
         
-        system_prompt = """You are a Database Schema Expert. Evaluate schemas with strict ETL standards. Reject schemas lacking clarity or with logical flaws."""
+        system_prompt = """You are a Database Schema Expert. Evaluate schemas with strict ETL standards. Reject schemas lacking clarity or with logical flaws. CRITICAL: Ensure one-to-many relationships are preserved, not collapsed into one-to-one."""
         
         evaluation_prompt = f"""Evaluate this schema design:
 
@@ -265,18 +309,24 @@ DATA:
 {state['dfs_sample_str']}
 
 CRITERIA (Total 100 points):
-1. Key Design: Composite key properly defined? (25 pts)
-2. UID Formula: Correct and collision-free? (25 pts)
-3. Column Coverage: All important columns included? (20 pts)
+1. Key Design: Composite key properly defined? (20 pts)
+2. UID Formula: Correct and collision-free? (20 pts)
+3. Column Coverage: All important columns included? (15 pts)
 4. Type Safety: Data types/transformations specified? (15 pts)
-5. Null Handling: Missing data strategy clear? (15 pts)
+5. Null Handling: Missing data strategy clear? (10 pts)
+6. CARDINALITY PRESERVATION: Does schema preserve one-to-many relationships? NOT collapse them? (20 pts)
+
+CRITICAL CHECK - One-to-Many Relationships:
+- If source data has multiple records per entity (e.g., transaction history, repairs, leases), the schema MUST preserve all records
+- REJECT if schema suggests: "deduplicate", "last record", "group by and select first/last", "unique records only"
+- ACCEPT only if schema keeps all records or explicitly states multi-file output strategy
 
 SCORING: 90-100=Production ready, 70-89=Minor improvements, 50-69=Gaps, <50=Redesign
 
 OUTPUT (JSON only):
 {{
   "confidence_score": <0-100>,
-  "feedback_text": "<Specific issues if score < 90>"
+  "feedback_text": "<Specific issues if score < 90. If schema collapses one-to-many to one-to-one, score MUST be < 50>"
 }}
 """
         
@@ -335,13 +385,17 @@ SCHEMA:
 FILES:
 {state['file_paths']}
 
-CRITICAL: Analyze data relationships first. Determine if single-file merge is appropriate.
+CRITICAL RULE - PRESERVE ALL RECORDS:
+- DO NOT use drop_duplicates(), groupby().first(), groupby().last(), or any deduplication
+- DO NOT filter to "unique" or "distinct" records
+- One-to-many relationships MUST be preserved (e.g., multiple repairs per property, multiple transactions per customer)
+- If data has different granularities, use multi-file output (see below)
 
 DECISION CRITERIA:
-- Single File: If all data shares same granularity (one-to-one relationships)
-- Multiple Files: If data has different granularities (one-to-many, many-to-many relationships)
+- Single File: If all data shares same granularity (one-to-one relationships only)
+- Multiple Files: If data has different granularities (one-to-many, many-to-many, time-series, transaction history)
 
-IF SINGLE FILE IS POSSIBLE:
+IF SINGLE FILE IS POSSIBLE (SAME GRANULARITY):
 1. Load all dataframes (handle CSV/Excel, iterate through sheets)
 2. Normalize keys: Create standardized key columns for each dataframe
    - Use .get() for optional columns, fill with constant if missing
@@ -350,22 +404,30 @@ IF SINGLE FILE IS POSSIBLE:
    - Apply prefixes if specified
 3. Create MASTER_UID: Concatenate all key columns with '_' delimiter
 4. Select columns: Keep [MASTER_UID, key_columns, value_columns]
-5. Merge: Use pd.concat() to stack OR pd.merge() on MASTER_UID
-6. Save: final_df.to_excel('{safe_output_path}', index=False)
-7. Print "SUCCESS: Unified data saved to master_unified_data.xlsx"
+5. Merge: Use pd.concat() to STACK (append rows) OR pd.merge() with how='outer' to preserve all records
+6. VERIFY: Check final row count >= sum of input row counts (no data loss)
+7. Save: final_df.to_excel('{safe_output_path}', index=False)
+8. Print "SUCCESS: Unified data saved to master_unified_data.xlsx"
 
-IF SINGLE FILE IS IMPOSSIBLE (Different Granularities):
+IF SINGLE FILE IS IMPOSSIBLE (DIFFERENT GRANULARITIES - ONE-TO-MANY DETECTED):
 1. Create normalized structure with multiple related tables
-2. Save as: master.xlsx, transactions.xlsx, details.xlsx, etc. in same output folder
-3. Create a relationships.txt file explaining the schema and foreign keys
-4. Print "SUCCESS: Data normalized into multiple files due to complex relationships. See relationships.txt for schema."
+2. Example structure:
+   - master_entities.xlsx: One row per unique entity (deduplicated master records)
+   - transactions.xlsx: All transaction/history records with foreign key to master
+   - time_series.xlsx: Time-based records with foreign key
+3. Save each as separate Excel file in output folder
+4. Create relationships.txt explaining:
+   - What each file contains
+   - Foreign key relationships
+   - How to join them in analysis tools
+5. Print "SUCCESS: Data normalized into multiple files due to one-to-many relationships. See relationships.txt for schema."
 
 REQUIREMENTS:
-- Detect data granularity conflicts (e.g., master records vs transaction history)
+- NEVER collapse one-to-many to one-to-one by selecting first/last/any single record
 - Handle missing columns gracefully
 - Convert all keys to string before operations
-- Ensure no data loss
-- Include error handling
+- Preserve ALL records - no silent data loss
+- Include row count validation
 - Be explicit about single vs multi-file output
 
 OUTPUT: Python code only, no explanations.
@@ -477,6 +539,34 @@ OUTPUT: Python code only, no explanations.
             }
 
     # ============================================================
+    # TERMINATION NODE FOR ONE-TO-MANY DETECTION
+    # ============================================================
+    
+    def node_one_to_many_stop(self, state: AgentState):
+        """Stops processing when one-to-many relationships are detected."""
+        logger.error("")
+        logger.error("⛔ " + "="*55)
+        logger.error("⛔ PROCESS STOPPED: ONE-TO-MANY RELATIONSHIP DETECTED")
+        logger.error("⛔ " + "="*55)
+        logger.error("")
+        logger.error("📊 Your data contains different granularities:")
+        logger.error("   - Master/reference data (one record per entity)")
+        logger.error("   - Transaction/detail data (multiple records per entity)")
+        logger.error("")
+        logger.error("❌ Cannot merge into a single flat file without data loss")
+        logger.error("")
+        logger.error("💡 SOLUTION OPTIONS:")
+        logger.error("   1. Upload only master-level files (same granularity)")
+        logger.error("   2. Use a database or data warehouse for complex relationships")
+        logger.error("   3. Process files separately and maintain relationships manually")
+        logger.error("")
+        
+        return {
+            "execution_result": "FAILED",
+            "execution_error": "One-to-many relationships detected. Cannot create single file without data loss. Please upload files with same granularity only."
+        }
+
+    # ============================================================
     # GRAPH BUILDER
     # ============================================================
     
@@ -486,6 +576,7 @@ OUTPUT: Python code only, no explanations.
         # Add all nodes
         workflow.add_node("identifier", self.node_identifier)
         workflow.add_node("id_evaluator", self.node_id_evaluator)
+        workflow.add_node("one_to_many_stop", self.node_one_to_many_stop)  # NEW
         workflow.add_node("schema_maker", self.node_schema_maker)
         workflow.add_node("schema_evaluator", self.node_schema_evaluator)
         workflow.add_node("code_generator", self.node_code_generator)
@@ -498,9 +589,17 @@ OUTPUT: Python code only, no explanations.
         workflow.add_edge("identifier", "id_evaluator")
         
         def route_after_id_eval(state):
-            """Route based on ID confidence and retries."""
+            """Route based on ID confidence, retries, and one-to-many detection."""
             confidence = state.get("id_confidence", 0)
             retries = state.get("id_retries", 0)
+            has_one_to_many = state.get("has_one_to_many", False)
+            
+            # Check for one-to-many relationships first
+            if has_one_to_many and (confidence >= 90 or retries >= 3):
+                logger.error("")
+                logger.error("🛑 STOPPING: One-to-many relationships cannot be merged into single file")
+                logger.error("")
+                return "one_to_many_stop"
             
             if confidence >= 90 or retries >= 3:
                 logger.info("")
@@ -519,9 +618,13 @@ OUTPUT: Python code only, no explanations.
             route_after_id_eval,
             {
                 "schema_maker": "schema_maker",
-                "identifier": "identifier"
+                "identifier": "identifier",
+                "one_to_many_stop": "one_to_many_stop"  # NEW route
             }
         )
+        
+        # Edge from one-to-many stop node to END
+        workflow.add_edge("one_to_many_stop", END)
         
         # Phase 2: Schema Loop
         workflow.add_edge("schema_maker", "schema_evaluator")
@@ -636,6 +739,7 @@ OUTPUT: Python code only, no explanations.
             "id_feedback": "",
             "id_confidence": 0.0,
             "id_retries": 0,
+            "has_one_to_many": False,  # NEW: Track one-to-many detection
             
             # Phase 2 state
             "schema": "",
