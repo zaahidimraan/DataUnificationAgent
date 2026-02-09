@@ -1,8 +1,10 @@
 flask
 pandas
 openpyxl
+xlsxwriter
 langchain
 langchain-google-genai
 langchain-experimental
 tabulate
 python-dotenv
+langgraph

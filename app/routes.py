@@ -2,10 +2,12 @@ import os
 import shutil
 from flask import Blueprint, render_template, request, current_app, send_from_directory, flash, redirect, url_for
 from werkzeug.utils import secure_filename
-from app.services import UnificationAgent
+from app.services import UnificationGraphAgent
 
 main_bp = Blueprint('main', __name__)
-agent = UnificationAgent()
+
+# Initialize the LangGraph Agent
+agent = UnificationGraphAgent()
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in current_app.config['ALLOWED_EXTENSIONS']
@@ -22,10 +24,11 @@ def process_files():
     
     files = request.files.getlist('files')
     
-    # Clean workspace
+    # 1. Setup Workspace
     upload_dir = current_app.config['UPLOAD_FOLDER']
     output_dir = current_app.config['OUTPUT_FOLDER']
     
+    # Reset directories for single-user mode
     for folder in [upload_dir, output_dir]:
         if os.path.exists(folder):
             shutil.rmtree(folder)
@@ -33,14 +36,11 @@ def process_files():
 
     saved_paths = []
     
+    # 2. Save Files
     for file in files:
-        if file.filename == '': continue
-        
-        # Validation
-        if not allowed_file(file.filename):
-            flash(f"Skipped '{file.filename}': Invalid file type.", "warning")
+        if file.filename == '' or not allowed_file(file.filename):
             continue
-
+            
         try:
             filename = secure_filename(file.filename)
             path = os.path.join(upload_dir, filename)
@@ -53,12 +53,13 @@ def process_files():
         flash('No valid files uploaded.', 'danger')
         return redirect(url_for('main.index'))
 
-    # Run Agent
+    # 3. Run LangGraph Agent
     try:
-        success, result = agent.unify_data(saved_paths, output_dir)
+        # The agent now handles the loop internally
+        success, result = agent.run(saved_paths, output_dir)
         
         if success:
-            flash("✅ Data Unification Complete!", "success")
+            flash("✅ Agent Strategy Complete. File Generated.", "success")
             return render_template('index.html', download_file=result)
         else:
             flash(f"❌ Processing Error: {result}", "danger")

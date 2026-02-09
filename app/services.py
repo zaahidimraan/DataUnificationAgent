@@ -1,122 +1,230 @@
 import pandas as pd
 import os
+import operator
+from typing import Annotated, List, Dict, TypedDict, Union
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
+from langchain_core.messages import SystemMessage, HumanMessage
+from langgraph.graph import StateGraph, END
 from app.utils import setup_logger
 
-logger = setup_logger("unification_engine")
+logger = setup_logger("langgraph_agent")
 
-class UnificationAgent:
+# --- STATE DEFINITION ---
+class AgentState(TypedDict):
+    # Inputs
+    file_paths: List[str]
+    dfs_sample_str: str  # String representation of headers & first 3 rows
+    output_folder: str
+    
+    # Internal Reasoning State
+    strategy: str        # The current plan
+    identifiers: str     # Identified Keys (e.g., "ID in Sheet A matches Ref in Sheet B")
+    schema: str          # The proposed final column structure
+    
+    # Control Flow
+    iteration: int       # Loop counter
+    is_satisfied: bool   # Stopping condition
+    final_code: str      # Python code to execute the merge
+    execution_result: str
+
+# --- THE AGENT CLASS ---
+class UnificationGraphAgent:
     def __init__(self):
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash", 
-            temperature=0,
-            convert_system_message_to_human=True
+            temperature=0
         )
+        self.graph = self._build_graph()
 
-    def _load_dataframe(self, path):
-        """
-        Smart Loader: Handles CSV and Excel (multiple sheets).
-        Returns: Dict { 'filename_sheetname': dataframe }
-        """
-        loaded_dfs = {}
-        filename = os.path.basename(path)
-        name_only, ext = os.path.splitext(filename)
-        ext = ext.lower()
-
-        try:
-            if ext == '.csv':
-                # Read CSV
-                df = pd.read_csv(path)
-                key = f"{name_only}_csv"
-                loaded_dfs[key] = df
-                
-            elif ext in ['.xlsx', '.xls']:
-                # Read Excel (All Sheets)
-                xl = pd.ExcelFile(path)
-                for sheet in xl.sheet_names:
-                    df = xl.parse(sheet)
-                    # Create a unique key for the agent to reference
-                    key = f"{name_only}_{sheet}".replace(" ", "_")
-                    loaded_dfs[key] = df
-            else:
-                logger.warning(f"Unsupported file type: {filename}")
-
-        except Exception as e:
-            logger.error(f"Error loading {filename}: {e}")
-            return {}
-
-        return loaded_dfs
-
-    def unify_data(self, file_paths, output_folder):
-        """
-        1. Loads only headers/samples.
-        2. Sends samples to LLM.
-        3. Executes merge.
-        """
-        # --- Step 1: Load Dataframes ---
-        master_registry = {} # Dict of {name: df}
-        
+    def _load_samples(self, file_paths):
+        """Helper to load lightweight samples for the LLM."""
+        context = ""
         for path in file_paths:
-            dfs = self._load_dataframe(path)
-            master_registry.update(dfs)
+            try:
+                filename = os.path.basename(path)
+                if path.endswith('.csv'):
+                    df = pd.read_csv(path)
+                    sample = df.head(3).to_markdown(index=False)
+                    context += f"\nFILE: {filename}\nTYPE: CSV\nCOLUMNS: {list(df.columns)}\nSAMPLE:\n{sample}\n"
+                else:
+                    xl = pd.ExcelFile(path)
+                    for sheet in xl.sheet_names:
+                        df = xl.parse(sheet)
+                        sample = df.head(3).to_markdown(index=False)
+                        context += f"\nFILE: {filename}\nSHEET: {sheet}\nCOLUMNS: {list(df.columns)}\nSAMPLE:\n{sample}\n"
+            except Exception as e:
+                logger.error(f"Error loading sample {path}: {e}")
+        return context
 
-        if not master_registry:
-            return False, "No valid data found (CSV or Excel) in uploaded files."
+    # --- NODES ---
 
-        # Cleaning: Strip whitespace from all column headers
-        for name, df in master_registry.items():
-            df.columns = df.columns.astype(str).str.strip()
-
-        # --- Step 2: Create Samples for LLM ---
-        # We manually construct the context to ensure ONLY samples are considered.
-        context_summary = ""
-        for name, df in master_registry.items():
-            # Taking only top 3 rows as sample
-            sample = df.head(3).to_markdown(index=False) 
-            context_summary += f"\n--- Table Name: {name} ---\nColumns: {list(df.columns)}\nSample Data:\n{sample}\n"
-
-        # --- Step 3: Initialize Agent ---
-        # We pass the list of dataframes. The agent functions map these to variables.
-        df_list = list(master_registry.values())
+    def node_strategy_maker(self, state: AgentState):
+        """Analyzes state and decides plan."""
+        iteration = state.get("iteration", 0)
+        current_schema = state.get("schema", "None yet")
         
-        agent = create_pandas_dataframe_agent(
-            self.llm,
-            df_list,
-            verbose=True,
-            allow_dangerous_code=True,
-            agent_executor_kwargs={"handle_parsing_errors": True}
-        )
-
-        output_file = 'master_unified_data.xlsx'
-        output_path = os.path.join(output_folder, output_file)
-
-        # --- Step 4: The 'Sample-Only' Prompt ---
-        # We explicitly tell the LLM to use the context_summary we built.
         prompt = f"""
-        You are a Data Architech. You have access to {len(df_list)} tables.
+        You are the STRATEGY MAKER for a Data Unification Task.
         
-        I have analyzed the files and extracted these SAMPLES (Top 3 rows only):
-        {context_summary}
-
+        DATA CONTEXT:
+        {state['dfs_sample_str']}
+        
+        CURRENT STATUS:
+        - Iteration: {iteration}/3
+        - Current Proposed Schema: {current_schema}
+        
         YOUR TASK:
-        1. Look at the 'Columns' and 'Sample Data' above to identify how these tables relate.
-        2. Find common keys (like 'ID', 'Email', 'Reference').
-        3. Write Pandas code to MERGE these tables into a single Master DataFrame.
-           - Start with the main 'Entity' table (like Users, Products, Properties).
-           - Join 'Transaction/History' tables to it using the keys identified.
-           - If tables have identical structures (e.g. data from Jan, data from Feb), append them first.
-        4. Save the final merged dataframe to: '{output_path}'
-        5. Return "SUCCESS_DONE" if the file is saved.
+        1. Analyze the data relationships.
+        2. if 'Current Proposed Schema' is "None yet" or seems incomplete/wrong, propose a HIGH-LEVEL MERGE STRATEGY.
+        3. If the schema looks solid and covers all data needs, Output "SATISFIED".
+        
+        OUTPUT FORMAT:
+        Start your response with either "SATISFIED" or "PLAN: [Your detailed strategy here]".
         """
+        response = self.llm.invoke(prompt).content
+        
+        is_satisfied = False
+        strategy_text = response
+        
+        if "SATISFIED" in response.upper() or iteration >= 3:
+            is_satisfied = True
+        
+        return {
+            "strategy": strategy_text,
+            "is_satisfied": is_satisfied,
+            "iteration": iteration + 1
+        }
 
+    def node_identifier(self, state: AgentState):
+        """Finds linking keys."""
+        prompt = f"""
+        You are the IDENTIFIER.
+        
+        STRATEGY: {state['strategy']}
+        DATA CONTEXT: {state['dfs_sample_str']}
+        
+        YOUR TASK:
+        Identify the Primary Keys and Foreign Keys that link these files.
+        - Look for exact name matches (e.g., 'id' == 'id')
+        - Look for semantic matches (e.g., 'Employee_ID' == 'Emp_Ref')
+        
+        Output a clear list of mappings.
+        """
+        response = self.llm.invoke(prompt).content
+        return {"identifiers": response}
+
+    def node_schema_maker(self, state: AgentState):
+        """Defines the target table structure."""
+        prompt = f"""
+        You are the SCHEMA MAKER.
+        
+        STRATEGY: {state['strategy']}
+        IDENTIFIED KEYS: {state['identifiers']}
+        DATA CONTEXT: {state['dfs_sample_str']}
+        
+        YOUR TASK:
+        Define the Final Schema for the Unified Master File.
+        List exactly which columns from which files will be included.
+        Resolve naming conflicts (e.g., rename 'Cost' to 'Repair_Cost' and 'Purchase_Cost').
+        """
+        response = self.llm.invoke(prompt).content
+        return {"schema": response}
+
+    def node_code_generator(self, state: AgentState):
+        """Writes the Python code to perform the merge."""
+        output_path = os.path.join(state['output_folder'], 'master_unified_data.xlsx').replace("\\", "/")
+        
+        prompt = f"""
+        You are the CODE GENERATOR.
+        
+        Final Schema Plan: {state['schema']}
+        Identifiers: {state['identifiers']}
+        File Paths: {state['file_paths']}
+        
+        YOUR TASK:
+        Write a robust Python script to:
+        1. Load the files specified in 'File Paths' using pandas.
+        2. Perform the merges/joins as described in the Schema Plan.
+        3. Handle missing values (NaN) gracefully.
+        4. Save the final dataframe to: '{output_path}'
+        
+        IMPORTANT:
+        - Return ONLY the Python code. 
+        - Do not use markdown blocks like ```python. Just the code.
+        - Ensure you import pandas as pd.
+        """
+        code = self.llm.invoke(prompt).content.strip().replace("```python", "").replace("```", "")
+        return {"final_code": code}
+
+    def node_executor(self, state: AgentState):
+        """Executes the generated code."""
+        code = state['final_code']
         try:
-            response = agent.invoke(prompt)
-            
-            if os.path.exists(output_path):
-                return True, output_file
-            else:
-                return False, f"Agent finished but file was not saved. Output: {response['output']}"
-                
+            # Dangerous execution - in prod use a sandbox
+            exec_globals = {}
+            exec(code, exec_globals)
+            return {"execution_result": "SUCCESS"}
         except Exception as e:
-            return False, f"Unification failed: {str(e)}"
+            logger.error(f"Execution Error: {e}")
+            return {"execution_result": f"FAILED: {str(e)}"}
+
+    # --- GRAPH BUILDER ---
+    def _build_graph(self):
+        workflow = StateGraph(AgentState)
+        
+        # Add Nodes
+        workflow.add_node("strategy_maker", self.node_strategy_maker)
+        workflow.add_node("identifier", self.node_identifier)
+        workflow.add_node("schema_maker", self.node_schema_maker)
+        workflow.add_node("code_generator", self.node_code_generator)
+        workflow.add_node("executor", self.node_executor)
+        
+        # Define Edges
+        workflow.set_entry_point("strategy_maker")
+        
+        # Conditional Logic: Loop or Finish
+        def check_satisfaction(state):
+            if state["is_satisfied"]:
+                return "code_generator"
+            else:
+                return "identifier"
+
+        workflow.add_conditional_edges(
+            "strategy_maker",
+            check_satisfaction,
+            {
+                "code_generator": "code_generator",
+                "identifier": "identifier"
+            }
+        )
+        
+        workflow.add_edge("identifier", "schema_maker")
+        workflow.add_edge("schema_maker", "strategy_maker") # Loop back to check
+        workflow.add_edge("code_generator", "executor")
+        workflow.add_edge("executor", END)
+        
+        return workflow.compile()
+
+    def run(self, file_paths, output_folder):
+        """Main entry point."""
+        # 1. Prepare Context
+        samples = self._load_samples(file_paths)
+        
+        # 2. Initialize State
+        initial_state = {
+            "file_paths": file_paths,
+            "dfs_sample_str": samples,
+            "output_folder": output_folder,
+            "iteration": 0,
+            "schema": "None yet",
+            "is_satisfied": False
+        }
+        
+        # 3. Run Graph
+        final_state = self.graph.invoke(initial_state)
+        
+        # 4. Check Result
+        if final_state["execution_result"] == "SUCCESS":
+            return True, "master_unified_data.xlsx"
+        else:
+            return False, final_state["execution_result"]
