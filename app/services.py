@@ -98,55 +98,45 @@ class IntelligentDataAgent:
         return metadata_log
 
     def query_data(self, user_query):
-        """
-        Phase 2: The Analyst.
-        Takes a user query (e.g., "Show price trends") and generates a result sheet.
-        """
-        if not DATA_MEMORY:
-            return None, "No data loaded. Please upload files first."
+            """
+            Phase 2: The Analyst.
+            Returns: (Success_Bool, Message_String)
+            """
+            if not DATA_MEMORY:
+                return False, "No data loaded. Please upload files first."
 
-        # Prepare the list of dataframes for the Agent
-        df_list = list(DATA_MEMORY.values())
-        
-        # We create a LangChain Pandas Agent.
-        # This Agent effectively gives Gemini a Python REPL to run pandas code.
-        agent = create_pandas_dataframe_agent(
-            self.llm,
-            df_list,
-            verbose=True,
-            allow_dangerous_code=True,
-            # Move error handling config here:
-            agent_executor_kwargs={"handle_parsing_errors": True} 
-        )
+            # Prepare the list of dataframes
+            df_list = list(DATA_MEMORY.values())
+            
+            # Create Pandas Agent
+            agent = create_pandas_dataframe_agent(
+                self.llm,
+                df_list,
+                verbose=True,
+                allow_dangerous_code=True,
+                agent_executor_kwargs={"handle_parsing_errors": True}
+            )
 
-        # Context Prompt to explain the data structure to the LLM
-        schema_info = "\n".join([f"Table {i}: Columns: {list(df.columns)}" for i, df in enumerate(df_list)])
-        
-        output_path = os.path.join(os.getcwd(), 'outputs', 'query_result.xlsx')
-        
-        full_prompt = f"""
-        You are an Expert Data Analyst. 
-        You have access to {len(df_list)} dataframes.
-        
-        User Request: "{user_query}"
-        
-        COMMANDS:
-        1. Find the common Identifier column across sheets (it might be named slightly differently, e.g. 'ID' vs 'Property_Ref').
-        2. Merge the necessary dataframes to answer the query.
-        3. **CRITICAL**: You MUST save the resulting dataframe to an Excel file at this path: '{output_path}'.
-        4. Return the string "SUCCESS" if the file was saved, otherwise explain the error.
-        """
-        
-        try:
-            # The agent will "reason" and execute Python code to answer
-            response = agent.invoke(full_prompt)
+            output_path = os.path.join(os.getcwd(), 'outputs', 'query_result.xlsx')
             
-            # Since the agent returns a string description, we need to capture the DataFrame.
-            # In a production environment, we would use a custom tool to extract the dataframe.
-            # For this prototype, we rely on the Agent's internal state or ask it to return the data as CSV text if needed.
-            # IMPROVEMENT: We will ask the Agent to explicitly output the result description.
+            full_prompt = f"""
+            You are an Expert Data Analyst. 
+            You have access to {len(df_list)} dataframes.
             
-            return response['output']
+            User Request: "{user_query}"
             
-        except Exception as e:
-            return None, f"Query failed: {str(e)}"
+            COMMANDS:
+            1. Find the common Identifier column across sheets.
+            2. Merge the necessary dataframes to answer the query.
+            3. **CRITICAL**: You MUST save the resulting dataframe to an Excel file at this path: '{output_path}'.
+            4. If successful, simply say "SUCCESS: File generated."
+            """
+            
+            try:
+                response = agent.invoke(full_prompt)
+                # Return True (Success) and the text response
+                return True, response['output']
+                
+            except Exception as e:
+                # Return False (Failure) and the error message
+                return False, f"Query failed: {str(e)}"

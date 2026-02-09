@@ -75,9 +75,15 @@ def query():
         return redirect(url_for('main.index'))
 
     try:
-        # The agent executes the logic and saves 'query_result.xlsx'
-        result_text = agent.query_data(user_query)
+        # UNPACKING FIX: Capture both success status and message
+        success, result_text = agent.query_data(user_query)
         
+        if not success:
+            # If agent failed (e.g., no data loaded), show warning
+            flash(f"Agent Error: {result_text}", "warning")
+            return render_template('index.html', logs=session.get('logs', []))
+
+        # If success, check for the file
         output_file = 'query_result.xlsx'
         output_path = os.path.join(current_app.config['OUTPUT_FOLDER'], output_file)
         
@@ -87,10 +93,11 @@ def query():
                                    answer=result_text, 
                                    download_file=output_file)
         else:
-            flash(f"Agent reply: {result_text} (No file generated)", "warning")
+            # Agent claimed success but didn't save the file
+            flash(f"Agent replied: {result_text} (But no file was generated)", "warning")
             
     except Exception as e:
-        flash(f"Query Error: {str(e)}", "danger")
+        flash(f"System Error: {str(e)}", "danger")
 
     return render_template('index.html', logs=session.get('logs', []))
 
