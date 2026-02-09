@@ -15,12 +15,16 @@ class AgentState(TypedDict):
     dfs_sample_str: str  
     output_folder: str
     
+    # Validation State
+    validation_passed: bool
+    validation_errors: str
+    
     # Phase 1: Identification State
     identifiers: str
     id_feedback: str
     id_confidence: float
     id_retries: int
-    has_one_to_many: bool  # NEW: Flag for one-to-many detection
+    has_one_to_many: bool
     
     # Phase 2: Schema State
     schema: str
@@ -77,6 +81,162 @@ class UnificationGraphAgent:
         return context
 
     # ============================================================
+    # PHASE 0: DATA VALIDATION
+    # ============================================================
+
+    def node_data_validator(self, state: AgentState):
+        """Validates uploaded data for quality issues before processing."""
+        logger.info("="*60)
+        logger.info("🔍 PHASE 0: DATA VALIDATION")
+        logger.info("="*60)
+        
+        errors = []
+        warnings = []
+        file_summaries = []
+        
+        for path in state['file_paths']:
+            filename = os.path.basename(path)
+            logger.info(f"Validating: {filename}")
+            
+            try:
+                # Validate file size (max 50MB per file)
+                file_size = os.path.getsize(path) / (1024 * 1024)  # MB
+                if file_size > 50:
+                    errors.append(f"{filename}: File too large ({file_size:.1f}MB). Max 50MB per file.")
+                    continue
+                
+                # Load and validate based on type
+                if path.endswith('.csv'):
+                    try:
+                        # Try different encodings and delimiters
+                        df = None
+                        for encoding in ['utf-8', 'latin1', 'cp1252']:
+                            try:
+                                df = pd.read_csv(path, encoding=encoding)
+                                break
+                            except:
+                                continue
+                        
+                        if df is None:
+                            errors.append(f"{filename}: Cannot read CSV. Check file encoding.")
+                            continue
+                        
+                        self._validate_dataframe(df, filename, filename, errors, warnings, file_summaries)
+                        
+                    except Exception as e:
+                        errors.append(f"{filename}: CSV parsing error - {str(e)}")
+                
+                elif path.endswith(('.xlsx', '.xls')):
+                    try:
+                        xl = pd.ExcelFile(path)
+                        
+                        if len(xl.sheet_names) == 0:
+                            errors.append(f"{filename}: No sheets found in Excel file.")
+                            continue
+                        
+                        for sheet in xl.sheet_names:
+                            df = xl.parse(sheet)
+                            self._validate_dataframe(df, filename, sheet, errors, warnings, file_summaries)
+                            
+                    except Exception as e:
+                        if 'Workbook is encrypted' in str(e) or 'password' in str(e).lower():
+                            errors.append(f"{filename}: File is password-protected. Please remove protection.")
+                        else:
+                            errors.append(f"{filename}: Excel reading error - {str(e)}")
+                else:
+                    errors.append(f"{filename}: Unsupported format. Only .xlsx, .xls, .csv allowed.")
+                    
+            except Exception as e:
+                errors.append(f"{filename}: Validation failed - {str(e)}")
+        
+        # Check total row count across all files (max 500K rows)
+        total_rows = sum([s['rows'] for s in file_summaries])
+        if total_rows > 500000:
+            errors.append(f"Total data too large: {total_rows:,} rows. Max 500,000 rows across all files.")
+        
+        # Log validation results
+        logger.info("")
+        if file_summaries:
+            logger.info(f"✅ Validated {len(file_summaries)} datasets, {total_rows:,} total rows")
+        
+        if warnings:
+            logger.warning("⚠️  WARNINGS:")
+            for w in warnings:
+                logger.warning(f"   {w}")
+        
+        if errors:
+            logger.error("")
+            logger.error("❌ VALIDATION FAILED:")
+            for e in errors:
+                logger.error(f"   {e}")
+            logger.error("")
+            
+            return {
+                "validation_passed": False,
+                "validation_errors": "\n".join(errors)
+            }
+        
+        logger.info("✅ All validation checks passed")
+        logger.info("")
+        return {
+            "validation_passed": True,
+            "validation_errors": ""
+        }
+    
+    def _validate_dataframe(self, df, filename, sheet, errors, warnings, file_summaries):
+        """Helper to validate individual dataframe."""
+        
+        # Check if empty
+        if len(df) == 0:
+            warnings.append(f"{filename}/{sheet}: Empty dataset (0 rows)")
+            return
+        
+        # Check if too wide
+        if len(df.columns) > 500:
+            errors.append(f"{filename}/{sheet}: Too many columns ({len(df.columns)}). Max 500 columns.")
+            return
+        
+        # Check for duplicate column names
+        duplicates = df.columns[df.columns.duplicated()].tolist()
+        if duplicates:
+            errors.append(f"{filename}/{sheet}: Duplicate column names: {duplicates}")
+            return
+        
+        # Check for completely empty columns
+        empty_cols = [col for col in df.columns if df[col].isna().all()]
+        if len(empty_cols) > len(df.columns) * 0.5:
+            warnings.append(f"{filename}/{sheet}: {len(empty_cols)} columns are completely empty")
+        
+        # Check for columns with only one unique value
+        constant_cols = [col for col in df.columns if df[col].nunique() == 1]
+        if constant_cols and len(constant_cols) > 3:
+            warnings.append(f"{filename}/{sheet}: {len(constant_cols)} columns have constant values")
+        
+        # Detect potential ID columns (for better error messages later)
+        id_candidates = [col for col in df.columns if 
+                        any(keyword in col.lower() for keyword in ['id', '_no', 'code', 'ref', 'key'])]
+        
+        # Check if ID columns have nulls
+        for col in id_candidates:
+            null_pct = df[col].isna().sum() / len(df) * 100
+            if null_pct > 50:
+                warnings.append(f"{filename}/{sheet}: Column '{col}' has {null_pct:.1f}% missing values")
+            
+            # Check for duplicates in potential ID columns
+            if df[col].notna().any():
+                non_null = df[col].dropna()
+                dup_pct = (len(non_null) - non_null.nunique()) / len(non_null) * 100
+                if dup_pct > 0 and 'id' in col.lower():
+                    warnings.append(f"{filename}/{sheet}: '{col}' has {dup_pct:.1f}% duplicate values")
+        
+        file_summaries.append({
+            'file': filename,
+            'sheet': sheet,
+            'rows': len(df),
+            'cols': len(df.columns)
+        })
+
+    # ============================================================
     # PHASE 1: IDENTIFICATION LOOP
     # ============================================================
 
@@ -94,36 +254,30 @@ class UnificationGraphAgent:
         
         feedback_context = ""
         if previous_feedback:
-            feedback_context = f"\n**PREVIOUS ATTEMPT FEEDBACK (Retry {retry_count}):**\n{previous_feedback}\n\nYou MUST address these concerns in your new proposal."
+            feedback_context = f"\nPREVIOUS FEEDBACK: {previous_feedback}\nFix these issues."
         
-        prompt = f"""You are a relational database expert. Analyze the data and identify linking keys for unification.
+        prompt = f"""Analyze data and identify linking keys.
 
-DATA CONTEXT:
+DATA:
 {state['dfs_sample_str']}
 
 TASK:
-1. Analyze data granularity for EACH file/sheet:
-   - Is it master/reference data? (one record per entity)
-   - Is it transaction/detail data? (multiple records per entity - e.g., history, events, logs)
-2. Identify the entity with the MAXIMUM number of identifier columns - this defines your composite key structure dimensions
-3. For entities with fewer identifiers, map them to this structure using constant padding (e.g., '0' or 'NA')
-4. If different entity types might have overlapping ID values, propose a prefix strategy to prevent collisions
-5. IMPORTANT: Note which datasets have one-to-many relationships (e.g., one property → many repairs)
-6. Be specific about which source column maps to which key position for every file/sheet
+1. For EACH file/sheet, classify as MASTER (one per entity) or DETAIL (many per entity, like transaction history)
+2. Find entity with most ID columns - this defines composite key structure
+3. Map other entities to this structure (use '0' for missing keys)
+4. Add prefix if IDs might conflict (e.g., 'F-' for Flats)
 
 {feedback_context}
 
-OUTPUT FORMAT (for EACH file/sheet):
-FILE: <filename>
+OUTPUT (for EACH file/sheet):
+FILE: <name>
 SHEET: <sheet>
-Granularity: <MASTER (one per entity) OR DETAIL (many per entity, e.g., transaction history)>
-Key_Mappings: <describe how source columns map to the composite key structure>
-Prefix: <prefix if needed, or 'None'>
+TYPE: <MASTER or DETAIL>
+KEYS: <how columns map to composite key>
+PREFIX: <prefix or None>
 ---
 
-SUMMARY:
-- List which files are MASTER level
-- List which files are DETAIL level (one-to-many relationships)
+SUMMARY: List MASTER files and DETAIL files separately.
 """
         
         logger.info("🤖 Calling LLM to identify keys...")
@@ -152,40 +306,31 @@ SUMMARY:
         """Evaluates the identification proposal with a confidence score."""
         logger.info("⚖️  Evaluating identification proposal...")
         
-        system_prompt = """You are a Senior Data Architect. Evaluate identification strategies with strict standards. Only give high confidence (90+) if flawless. CRITICAL: Ensure proper granularity analysis (master vs detail)."""
-        
-        evaluation_prompt = f"""Evaluate this identification strategy:
+        prompt = f"""You are a Senior Data Architect. Score this identification strategy (0-100).
 
-PROPOSED IDENTIFIERS:
+PROPOSAL:
 {state['identifiers']}
 
 DATA:
 {state['dfs_sample_str']}
 
-CRITERIA (Total 100 points):
-1. Completeness: All files/sheets mapped? (25 pts)
-2. Consistency: Uniform composite key structure? (20 pts)
-3. Collision Prevention: No ID conflicts? (20 pts)
-4. Clarity: Unambiguous and implementable? (15 pts)
-5. GRANULARITY ANALYSIS: Properly identifies master vs detail (one-to-many) data? (20 pts)
+SCORING (100 points):
+1. All files mapped? (25 pts)
+2. Consistent key structure? (20 pts)
+3. No ID collisions? (20 pts)
+4. Clear implementation? (15 pts)
+5. Proper MASTER/DETAIL classification? (20 pts)
 
-CRITICAL CHECK - Granularity:
-- Does proposal distinguish between master data (one per entity) and detail data (many per entity)?
-- Are one-to-many relationships identified (e.g., one customer → many orders)?
-- If no granularity analysis present, score MUST be < 70
-
-SCORING: 90-100=Production ready, 70-89=Minor issues, 50-69=Needs work, <50=Major flaws
+CRITICAL: If proposal doesn't classify MASTER vs DETAIL data, score < 70.
 
 OUTPUT (JSON only):
 {{
   "confidence_score": <0-100>,
-  "feedback_text": "<Specific issues if score < 90. If missing granularity analysis, request it explicitly>"
+  "feedback_text": "<Issues if < 90. Request MASTER/DETAIL classification if missing>"
 }}
 """
         
-        # Create a combined prompt with system context
-        full_prompt = f"{system_prompt}\n\n{evaluation_prompt}"
-        response = self.llm.invoke(full_prompt).content
+        response = self.llm.invoke(prompt).content
         
         # Parse JSON response
         try:
@@ -235,50 +380,38 @@ OUTPUT (JSON only):
         
         feedback_context = ""
         if previous_feedback:
-            feedback_context = f"\n**PREVIOUS ATTEMPT FEEDBACK (Retry {retry_count}):**\n{previous_feedback}\n\nYou MUST fix these issues."
+            feedback_context = f"\nPREVIOUS FEEDBACK: {previous_feedback}\nFix these."
         
-        prompt = f"""You are a Schema Architect. Design the unified master table schema.
+        prompt = f"""Design unified schema that preserves all data.
 
-APPROVED IDENTIFIERS:
+IDENTIFIERS:
 {state['identifiers']}
 
 DATA:
 {state['dfs_sample_str']}
 
-CRITICAL - ONE-TO-MANY PRESERVATION:
-- If source data has multiple records per entity (transaction history, time-series, event logs), you MUST preserve all records
-- DO NOT suggest deduplication, groupby().first(), or selecting "latest record only"
-- For one-to-many data: Either create multi-file normalized structure OR ensure single file preserves all detail records
+CRITICAL: If data has MASTER + DETAIL files, they CANNOT merge into one file. State multi-file output.
 
 REQUIREMENTS:
-1. Analyze data granularity: Are all datasets at same level (one-to-one) or different levels (one-to-many)?
-2. Define standardized key columns based on the composite key structure identified (name, type, logic for each)
-3. Define Master Unique ID formula that concatenates all key columns with delimiter
-4. List all value columns to retain from source files with null handling strategy
-5. Specify if single-file merge is possible or multi-file output required (based on granularity)
-6. If multi-file: Explicitly state which files go into master vs detail tables
+1. Analyze granularity: All same level or mixed?  
+2. Define key columns and Master UID formula
+3. List value columns to keep
+4. State SINGLE FILE (if same granularity) or MULTI-FILE (if mixed)
 
 {feedback_context}
 
-OUTPUT FORMAT:
-# DATA GRANULARITY ANALYSIS
-<State if all files have same granularity OR list which files are master vs detail>
+OUTPUT:
+# GRANULARITY
+<All same OR mixed (master+detail)>
 
-# MERGE STRATEGY
-<Single file OR Multi-file with explanation>
+# STRATEGY
+<Single file OR Multi-file with reason>
 
-# COMPOSITE KEY STRUCTURE
-<List each key column with name, type, and logic>
-Master_UID: <formula using identified keys>
+# KEYS
+<Key columns + Master_UID formula>
 
-# VALUE COLUMNS
-- <column>: <source mapping, type, null handling>
-
-# TRANSFORMATIONS
-- <any special rules>
-
-# CARDINALITY
-<Confirm one-to-one OR preserve one-to-many>
+# COLUMNS
+<Value columns to retain>
 """
         
         logger.info("🤖 Calling LLM to design schema...")
@@ -295,43 +428,32 @@ Master_UID: <formula using identified keys>
         """Evaluates the schema proposal."""
         logger.info("⚖️  Evaluating schema design...")
         
-        system_prompt = """You are a Database Schema Expert. Evaluate schemas with strict ETL standards. Reject schemas lacking clarity or with logical flaws. CRITICAL: Ensure one-to-many relationships are preserved, not collapsed into one-to-one."""
-        
-        evaluation_prompt = f"""Evaluate this schema design:
+        evaluation_prompt = f"""Evaluate schema quality.
 
-PROPOSED SCHEMA:
+SCHEMA:
 {state['schema']}
-
-IDENTIFIERS:
-{state['identifiers']}
 
 DATA:
 {state['dfs_sample_str']}
 
-CRITERIA (Total 100 points):
-1. Key Design: Composite key properly defined? (20 pts)
-2. UID Formula: Correct and collision-free? (20 pts)
-3. Column Coverage: All important columns included? (15 pts)
-4. Type Safety: Data types/transformations specified? (15 pts)
-5. Null Handling: Missing data strategy clear? (10 pts)
-6. CARDINALITY PRESERVATION: Does schema preserve one-to-many relationships? NOT collapse them? (20 pts)
+CHECK:
+1. Keys handle all unique combinations?
+2. All value columns included?
+3. Strategy matches granularity (single vs multi-file)?
+4. If one-to-many, is it preserved (not collapsed)?
 
-CRITICAL CHECK - One-to-Many Relationships:
-- If source data has multiple records per entity (e.g., transaction history, repairs, leases), the schema MUST preserve all records
-- REJECT if schema suggests: "deduplicate", "last record", "group by and select first/last", "unique records only"
-- ACCEPT only if schema keeps all records or explicitly states multi-file output strategy
+SCORE: 0-100
+- 90+: Approve
+- <90: Reject with specific issues
 
-SCORING: 90-100=Production ready, 70-89=Minor improvements, 50-69=Gaps, <50=Redesign
-
-OUTPUT (JSON only):
+OUTPUT (JSON):
 {{
-  "confidence_score": <0-100>,
-  "feedback_text": "<Specific issues if score < 90. If schema collapses one-to-many to one-to-one, score MUST be < 50>"
+  "confidence_score": <number>,
+  "feedback_text": "<Issues if rejected, else 'Approved'>"
 }}
 """
         
-        full_prompt = f"{system_prompt}\n\n{evaluation_prompt}"
-        response = self.llm.invoke(full_prompt).content
+        response = self.llm.invoke(evaluation_prompt).content
         
         # Parse JSON response
         try:
@@ -374,10 +496,7 @@ OUTPUT (JSON only):
         
         safe_output_path = os.path.join(state['output_folder'], 'master_unified_data.xlsx').replace("\\", "/")
         
-        prompt = f"""Generate Python code to unify the data based on approved design.
-
-IDENTIFIERS:
-{state['identifiers']}
+        prompt = f"""Generate Python code to implement the schema.
 
 SCHEMA:
 {state['schema']}
@@ -385,53 +504,29 @@ SCHEMA:
 FILES:
 {state['file_paths']}
 
-CRITICAL RULE - PRESERVE ALL RECORDS:
-- DO NOT use drop_duplicates(), groupby().first(), groupby().last(), or any deduplication
-- DO NOT filter to "unique" or "distinct" records
-- One-to-many relationships MUST be preserved (e.g., multiple repairs per property, multiple transactions per customer)
-- If data has different granularities, use multi-file output (see below)
+RULES:
+- NEVER use drop_duplicates(), deduplicate, or select first/last record
+- Preserve ALL records (one-to-many must not collapse)
+- Handle missing columns with .get() and fillna('<missing>')
+- Convert keys to string: astype(str).str.strip()
+- Create MASTER_UID by concatenating keys with '_'
 
-DECISION CRITERIA:
-- Single File: If all data shares same granularity (one-to-one relationships only)
-- Multiple Files: If data has different granularities (one-to-many, many-to-many, time-series, transaction history)
+SINGLE FILE (if same granularity):
+1. Load all dataframes (handle CSV/Excel sheets)
+2. Normalize keys for each df
+3. Create MASTER_UID column
+4. Merge with pd.concat() or pd.merge(how='outer')
+5. Verify: row count >= sum of inputs
+6. Save to '{safe_output_path}'
+7. Print "SUCCESS: Unified data saved to master_unified_data.xlsx"
 
-IF SINGLE FILE IS POSSIBLE (SAME GRANULARITY):
-1. Load all dataframes (handle CSV/Excel, iterate through sheets)
-2. Normalize keys: Create standardized key columns for each dataframe
-   - Use .get() for optional columns, fill with constant if missing
-   - Convert all keys to string: .astype(str).str.strip()
-   - Fill NaN values: .fillna('<constant>', inplace=True)
-   - Apply prefixes if specified
-3. Create MASTER_UID: Concatenate all key columns with '_' delimiter
-4. Select columns: Keep [MASTER_UID, key_columns, value_columns]
-5. Merge: Use pd.concat() to STACK (append rows) OR pd.merge() with how='outer' to preserve all records
-6. VERIFY: Check final row count >= sum of input row counts (no data loss)
-7. Save: final_df.to_excel('{safe_output_path}', index=False)
-8. Print "SUCCESS: Unified data saved to master_unified_data.xlsx"
+MULTI-FILE (if different granularity):
+1. Create separate files for each level (master, detail, etc.)
+2. Save each to output folder
+3. Create relationships.txt explaining structure
+4. Print "SUCCESS: Data normalized into multiple files. See relationships.txt"
 
-IF SINGLE FILE IS IMPOSSIBLE (DIFFERENT GRANULARITIES - ONE-TO-MANY DETECTED):
-1. Create normalized structure with multiple related tables
-2. Example structure:
-   - master_entities.xlsx: One row per unique entity (deduplicated master records)
-   - transactions.xlsx: All transaction/history records with foreign key to master
-   - time_series.xlsx: Time-based records with foreign key
-3. Save each as separate Excel file in output folder
-4. Create relationships.txt explaining:
-   - What each file contains
-   - Foreign key relationships
-   - How to join them in analysis tools
-5. Print "SUCCESS: Data normalized into multiple files due to one-to-many relationships. See relationships.txt for schema."
-
-REQUIREMENTS:
-- NEVER collapse one-to-many to one-to-one by selecting first/last/any single record
-- Handle missing columns gracefully
-- Convert all keys to string before operations
-- Preserve ALL records - no silent data loss
-- Include row count validation
-- Be explicit about single vs multi-file output
-
-OUTPUT: Python code only, no explanations.
-"""
+OUTPUT: Python code only, no markdown."""
         
         logger.info("🤖 Calling LLM to generate Python code...")
         response = self.llm.invoke(prompt).content.strip()
@@ -539,8 +634,17 @@ OUTPUT: Python code only, no explanations.
             }
 
     # ============================================================
-    # TERMINATION NODE FOR ONE-TO-MANY DETECTION
+    # TERMINATION NODES
     # ============================================================
+    
+    def node_validation_failed(self, state: AgentState):
+        """Stops processing when validation fails."""
+        logger.error("⛔ PROCESS STOPPED: DATA VALIDATION FAILED")
+        logger.error("")
+        return {
+            "execution_result": "FAILED",
+            "execution_error": state.get("validation_errors", "Data validation failed")
+        }
     
     def node_one_to_many_stop(self, state: AgentState):
         """Stops processing when one-to-many relationships are detected."""
@@ -574,16 +678,39 @@ OUTPUT: Python code only, no explanations.
         workflow = StateGraph(AgentState)
         
         # Add all nodes
+        workflow.add_node("data_validator", self.node_data_validator)  # Phase 0
+        workflow.add_node("validation_stop", self.node_validation_failed)  # Validation failure
         workflow.add_node("identifier", self.node_identifier)
         workflow.add_node("id_evaluator", self.node_id_evaluator)
-        workflow.add_node("one_to_many_stop", self.node_one_to_many_stop)  # NEW
+        workflow.add_node("one_to_many_stop", self.node_one_to_many_stop)
         workflow.add_node("schema_maker", self.node_schema_maker)
         workflow.add_node("schema_evaluator", self.node_schema_evaluator)
         workflow.add_node("code_generator", self.node_code_generator)
         workflow.add_node("executor", self.node_executor)
         
-        # Entry point
-        workflow.set_entry_point("identifier")
+        # Entry point: Validation first
+        workflow.set_entry_point("data_validator")
+        
+        # Phase 0: Validation routing
+        def route_after_validation(state):
+            """Route based on validation results."""
+            if state.get("validation_passed", False):
+                logger.info("✅ Data validation passed - proceeding to Phase 1")
+                return "identifier"
+            else:
+                return "validation_stop"
+        
+        workflow.add_conditional_edges(
+            "data_validator",
+            route_after_validation,
+            {
+                "identifier": "identifier",
+                "validation_stop": "validation_stop"
+            }
+        )
+        
+        # Validation stop leads to END
+        workflow.add_edge("validation_stop", END)
         
         # Phase 1: Identification Loop
         workflow.add_edge("identifier", "id_evaluator")
@@ -733,6 +860,10 @@ OUTPUT: Python code only, no explanations.
             "file_paths": file_paths,
             "dfs_sample_str": samples,
             "output_folder": output_folder,
+            
+            # Phase 0 validation state
+            "validation_passed": False,
+            "validation_errors": [],
             
             # Phase 1 state
             "identifiers": "",
