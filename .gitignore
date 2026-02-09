@@ -6,3 +6,5 @@ uploads
 *.xlsx
 *.csv
 .env
+.csv
+xlsx

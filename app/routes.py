@@ -5,9 +5,10 @@ from werkzeug.utils import secure_filename
 from app.services import UnificationAgent
 
 main_bp = Blueprint('main', __name__)
-
-# Single global instance for simplicity (as requested)
 agent = UnificationAgent()
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in current_app.config['ALLOWED_EXTENSIONS']
 
 @main_bp.route('/', methods=['GET'])
 def index():
@@ -15,20 +16,16 @@ def index():
 
 @main_bp.route('/process', methods=['POST'])
 def process_files():
-    """
-    Handles Upload AND Processing in one step.
-    """
     if 'files' not in request.files:
         flash('No file part', 'danger')
         return redirect(url_for('main.index'))
     
     files = request.files.getlist('files')
     
-    # 1. Setup a clean workspace
+    # Clean workspace
     upload_dir = current_app.config['UPLOAD_FOLDER']
     output_dir = current_app.config['OUTPUT_FOLDER']
     
-    # Clean previous run (Simple mode: One user, one state)
     for folder in [upload_dir, output_dir]:
         if os.path.exists(folder):
             shutil.rmtree(folder)
@@ -36,30 +33,35 @@ def process_files():
 
     saved_paths = []
     
-    # 2. Save Files
     for file in files:
         if file.filename == '': continue
-        if '.' in file.filename and file.filename.rsplit('.', 1)[1].lower() in {'xlsx', 'xls', 'csv'}:
+        
+        # Validation
+        if not allowed_file(file.filename):
+            flash(f"Skipped '{file.filename}': Invalid file type.", "warning")
+            continue
+
+        try:
             filename = secure_filename(file.filename)
             path = os.path.join(upload_dir, filename)
             file.save(path)
             saved_paths.append(path)
+        except Exception as e:
+            flash(f"Error saving {file.filename}", "danger")
 
     if not saved_paths:
-        flash('No valid Excel/CSV files uploaded.', 'warning')
+        flash('No valid files uploaded.', 'danger')
         return redirect(url_for('main.index'))
 
-    # 3. Run Agent Automatically
+    # Run Agent
     try:
         success, result = agent.unify_data(saved_paths, output_dir)
         
         if success:
-            # Result is the filename
-            flash("✅ Unification Complete! Your master file is ready.", "success")
+            flash("✅ Data Unification Complete!", "success")
             return render_template('index.html', download_file=result)
         else:
-            # Result is the error message
-            flash(f"❌ Error: {result}", "danger")
+            flash(f"❌ Processing Error: {result}", "danger")
             
     except Exception as e:
         flash(f"System Error: {str(e)}", "danger")

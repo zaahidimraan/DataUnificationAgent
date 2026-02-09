@@ -8,45 +8,78 @@ logger = setup_logger("unification_engine")
 
 class UnificationAgent:
     def __init__(self):
-        # Using Gemini 2.5 Flash for speed and reasoning
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash", 
             temperature=0,
             convert_system_message_to_human=True
         )
 
-    def unify_data(self, file_paths, output_folder):
+    def _load_dataframe(self, path):
         """
-        Loads all files and automatically merges them into a master file.
+        Smart Loader: Handles CSV and Excel (multiple sheets).
+        Returns: Dict { 'filename_sheetname': dataframe }
         """
-        df_list = []
-        df_names = []
-        
-        # 1. Load all Excel sheets into DataFrames
-        for path in file_paths:
-            try:
-                xl = pd.ExcelFile(path)
-                filename = os.path.basename(path)
+        loaded_dfs = {}
+        filename = os.path.basename(path)
+        name_only, ext = os.path.splitext(filename)
+        ext = ext.lower()
+
+        try:
+            if ext == '.csv':
+                # Read CSV
+                df = pd.read_csv(path)
+                key = f"{name_only}_csv"
+                loaded_dfs[key] = df
                 
+            elif ext in ['.xlsx', '.xls']:
+                # Read Excel (All Sheets)
+                xl = pd.ExcelFile(path)
                 for sheet in xl.sheet_names:
                     df = xl.parse(sheet)
-                    if df.empty: continue
-                    
-                    # Basic cleaning
-                    df.columns = df.columns.astype(str).str.strip()
-                    
-                    # Store DF and a helpful name for the LLM
-                    df_list.append(df)
-                    df_names.append(f"{filename} - Sheet: {sheet}")
-                    
-            except Exception as e:
-                logger.error(f"Error reading {path}: {e}")
-                return False, f"Failed to read file: {os.path.basename(path)}"
+                    # Create a unique key for the agent to reference
+                    key = f"{name_only}_{sheet}".replace(" ", "_")
+                    loaded_dfs[key] = df
+            else:
+                logger.warning(f"Unsupported file type: {filename}")
 
-        if not df_list:
-            return False, "No valid data found in uploaded files."
+        except Exception as e:
+            logger.error(f"Error loading {filename}: {e}")
+            return {}
 
-        # 2. Create the Pandas Agent
+        return loaded_dfs
+
+    def unify_data(self, file_paths, output_folder):
+        """
+        1. Loads only headers/samples.
+        2. Sends samples to LLM.
+        3. Executes merge.
+        """
+        # --- Step 1: Load Dataframes ---
+        master_registry = {} # Dict of {name: df}
+        
+        for path in file_paths:
+            dfs = self._load_dataframe(path)
+            master_registry.update(dfs)
+
+        if not master_registry:
+            return False, "No valid data found (CSV or Excel) in uploaded files."
+
+        # Cleaning: Strip whitespace from all column headers
+        for name, df in master_registry.items():
+            df.columns = df.columns.astype(str).str.strip()
+
+        # --- Step 2: Create Samples for LLM ---
+        # We manually construct the context to ensure ONLY samples are considered.
+        context_summary = ""
+        for name, df in master_registry.items():
+            # Taking only top 3 rows as sample
+            sample = df.head(3).to_markdown(index=False) 
+            context_summary += f"\n--- Table Name: {name} ---\nColumns: {list(df.columns)}\nSample Data:\n{sample}\n"
+
+        # --- Step 3: Initialize Agent ---
+        # We pass the list of dataframes. The agent functions map these to variables.
+        df_list = list(master_registry.values())
+        
         agent = create_pandas_dataframe_agent(
             self.llm,
             df_list,
@@ -58,24 +91,23 @@ class UnificationAgent:
         output_file = 'master_unified_data.xlsx'
         output_path = os.path.join(output_folder, output_file)
 
-        # 3. The "Auto-Pilot" Prompt
-        # We give the LLM the list of sheet names so it understands the context (e.g., "Flats" vs "Repairs")
-        context_str = "\n".join(df_names)
-        
+        # --- Step 4: The 'Sample-Only' Prompt ---
+        # We explicitly tell the LLM to use the context_summary we built.
         prompt = f"""
-        You are an Autonomous Data Unification Bot.
+        You are a Data Architech. You have access to {len(df_list)} tables.
         
-        I have loaded {len(df_list)} data tables. Here are their sources:
-        {context_str}
-        
-        YOUR MISSION:
-        1. Analyze the columns to find common Identifiers (e.g., 'ID', 'Ref', 'Code').
-        2. Merge ALL these tables into a single 'Master DataFrame'. 
-           - If there are multiple master lists (like Flats and Villas), append/concat them first.
-           - Then merge that combined list with any Transaction/History/Repair logs.
-        3. Ensure no data is lost (use outer joins if necessary).
-        4. **CRITICAL**: Save the final result to an Excel file at: '{output_path}'
-        5. If successful, return the string: "SUCCESS_DONE"
+        I have analyzed the files and extracted these SAMPLES (Top 3 rows only):
+        {context_summary}
+
+        YOUR TASK:
+        1. Look at the 'Columns' and 'Sample Data' above to identify how these tables relate.
+        2. Find common keys (like 'ID', 'Email', 'Reference').
+        3. Write Pandas code to MERGE these tables into a single Master DataFrame.
+           - Start with the main 'Entity' table (like Users, Products, Properties).
+           - Join 'Transaction/History' tables to it using the keys identified.
+           - If tables have identical structures (e.g. data from Jan, data from Feb), append them first.
+        4. Save the final merged dataframe to: '{output_path}'
+        5. Return "SUCCESS_DONE" if the file is saved.
         """
 
         try:
