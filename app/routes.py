@@ -4,86 +4,118 @@ from werkzeug.utils import secure_filename
 from app.services import IntelligentDataAgent
 
 main_bp = Blueprint('main', __name__)
-agent = IntelligentDataAgent() # Persistent Agent Instance
 
-@main_bp.route('/', methods=['GET', 'POST'])
+# Helper to get the Active Agent based on Session
+def get_active_agent():
+    # 1. Get API Key
+    api_keys = session.get('api_keys', [])
+    active_index = session.get('active_key_index', 0)
+    
+    if not api_keys:
+        # Fallback to .env if no keys in session
+        env_key = os.getenv("GOOGLE_API_KEY")
+        if env_key:
+            current_key = env_key
+        else:
+            raise ValueError("No API Key found. Please add one in Settings.")
+    else:
+        # Safe index access
+        if active_index >= len(api_keys): active_index = 0
+        current_key = api_keys[active_index]
+
+    # 2. Get Model
+    current_model = session.get('active_model', 'gemini-2.0-flash-exp')
+
+    return IntelligentDataAgent(api_key=current_key, model_name=current_model)
+
+@main_bp.route('/', methods=['GET'])
 def index():
-    return render_template('index.html')
+    # Initialize session defaults if not present
+    if 'api_keys' not in session: session['api_keys'] = []
+    if 'active_key_index' not in session: session['active_key_index'] = 0
+    if 'active_model' not in session: session['active_model'] = 'gemini-2.0-flash-exp'
+    
+    return render_template('index.html', 
+                           api_keys=session['api_keys'], 
+                           active_index=session['active_key_index'],
+                           active_model=session['active_model'])
 
-def allowed_file(filename):
-    """Check if file has allowed extension."""
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in current_app.config['ALLOWED_EXTENSIONS']
+@main_bp.route('/settings/update', methods=['POST'])
+def update_settings():
+    # 1. Handle Model Change
+    selected_model = request.form.get('model_name')
+    if selected_model:
+        session['active_model'] = selected_model
+    
+    # 2. Handle API Key Add/Select
+    action = request.form.get('action')
+    
+    if action == 'add_key':
+        new_key = request.form.get('new_api_key')
+        if new_key:
+            keys = session.get('api_keys', [])
+            keys.append(new_key.strip())
+            session['api_keys'] = keys
+            session['active_key_index'] = len(keys) - 1 # Auto-select new key
+            flash("API Key added and selected.", "success")
+            
+    elif action == 'select_key':
+        try:
+            index = int(request.form.get('key_index'))
+            session['active_key_index'] = index
+            flash(f"Switched to API Key #{index+1}", "info")
+        except:
+            pass
+            
+    elif action == 'delete_key':
+        try:
+            index = int(request.form.get('key_index'))
+            keys = session.get('api_keys', [])
+            if 0 <= index < len(keys):
+                keys.pop(index)
+                session['api_keys'] = keys
+                session['active_key_index'] = 0
+                flash("API Key removed.", "warning")
+        except:
+            pass
 
+    return redirect(url_for('main.index'))
 
 @main_bp.route('/upload', methods=['POST'])
 def upload_files():
-    if 'files' not in request.files:
-        flash('No file part', 'danger')
-        return redirect(url_for('main.index'))
+    if 'files' not in request.files: return redirect(url_for('main.index'))
     
     files = request.files.getlist('files')
     saved_paths = []
-    errors = []
 
     for file in files:
-        if file.filename == '':
-            errors.append('Empty filename')
-            continue
-        
-        # Validate file extension
-        if not allowed_file(file.filename):
-            errors.append(f"'{file.filename}' - Invalid file type. Only .xlsx, .xls, .csv allowed")
-            continue
-        
-        try:
-            filename = secure_filename(file.filename)
-            path = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
-            file.save(path)
-            
-            # Verify file actually exists before proceeding
-            if not os.path.exists(path) or os.path.getsize(path) == 0:
-                errors.append(f"'{filename}' - File save failed or empty")
-                continue
-            
-            saved_paths.append(path)
-        except Exception as e:
-            errors.append(f"'{file.filename}' - Error: {str(e)}")
+        if file.filename == '': continue
+        filename = secure_filename(file.filename)
+        path = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
+        file.save(path)
+        saved_paths.append(path)
     
-    # Show any errors
-    for error in errors:
-        flash(error, 'warning')
-    
-    if not saved_paths:
-        flash('No valid files were uploaded', 'danger')
-        return redirect(url_for('main.index'))
-    
-    # Trigger Ingestion
     try:
+        # DYNAMIC AGENT INSTANTIATION
+        agent = get_active_agent()
         logs = agent.ingest_files(saved_paths)
-        session['logs'] = logs # Store logs to show user
-        flash(f"Successfully ingested {len(files)} files. Ready for queries!", "success")
+        session['logs'] = logs
+        flash(f"Ingested {len(saved_paths)} files using {agent.model_name}.", "success")
     except Exception as e:
-        flash(f"Error during ingestion: {str(e)}", "danger")
+        flash(f"Ingestion Error: {str(e)}", "danger")
 
     return redirect(url_for('main.index'))
 
 @main_bp.route('/query', methods=['POST'])
 def query():
     user_query = request.form.get('query_text')
-    
-    if not user_query:
-        return redirect(url_for('main.index'))
+    if not user_query: return redirect(url_for('main.index'))
 
     try:
-        # UNPACKING FIX: Capture both success status and message
+        # DYNAMIC AGENT INSTANTIATION
+        agent = get_active_agent()
         success, result_text = agent.query_data(user_query)
         
-        if not success:
-            # If agent failed (e.g., no data loaded), show warning
-            flash(f"Agent Error: {result_text}", "warning")
-            return render_template('index.html', logs=session.get('logs', []))
-
-        # If success, check for the file
         output_file = 'query_result.xlsx'
         output_path = os.path.join(current_app.config['OUTPUT_FOLDER'], output_file)
         
@@ -91,15 +123,21 @@ def query():
             return render_template('index.html', 
                                    logs=session.get('logs', []), 
                                    answer=result_text, 
-                                   download_file=output_file)
+                                   download_file=output_file,
+                                   api_keys=session.get('api_keys', []),
+                                   active_index=session.get('active_key_index', 0),
+                                   active_model=session.get('active_model'))
         else:
-            # Agent claimed success but didn't save the file
-            flash(f"Agent replied: {result_text} (But no file was generated)", "warning")
+            flash(f"Agent ({agent.model_name}) replied: {result_text}", "warning")
             
     except Exception as e:
-        flash(f"System Error: {str(e)}", "danger")
+        flash(f"Error: {str(e)}", "danger")
 
-    return render_template('index.html', logs=session.get('logs', []))
+    return render_template('index.html', 
+                           logs=session.get('logs', []),
+                           api_keys=session.get('api_keys', []),
+                           active_index=session.get('active_key_index', 0),
+                           active_model=session.get('active_model'))
 
 @main_bp.route('/download/<filename>')
 def download_file(filename):
