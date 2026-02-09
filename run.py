@@ -15,4 +15,4 @@ app = create_app()
 
 if __name__ == '__main__':
     # CRITICAL FIX: use_reloader=False prevents restart on file upload
-    app.run(debug=True, use_reloader=False, port=5000)
+    app.run(debug=True, port=5000)

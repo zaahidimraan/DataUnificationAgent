@@ -2,141 +2,59 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Gemini Multi-Model Agent</title>
+    <title>Auto Data Unifier</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        .upload-box { border: 2px dashed #0d6efd; padding: 40px; border-radius: 10px; background: #f8f9fa; }
+        .upload-box:hover { background: #e9ecef; }
+    </style>
 </head>
 <body class="bg-light">
 
-<nav class="navbar navbar-dark bg-dark mb-4">
-    <div class="container">
-        <span class="navbar-brand mb-0 h1">🧠 Gemini Data Agent</span>
-        <button class="btn btn-outline-light btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#settingsPanel">
-            <i class="fas fa-cog"></i> Settings
-        </button>
+<div class="container mt-5" style="max-width: 800px;">
+    <div class="text-center mb-5">
+        <h1 class="display-5">⚡ Auto Data Unifier</h1>
+        <p class="lead text-muted">Upload scattered Excel files. Get one Master File back.</p>
     </div>
-</nav>
 
-<div class="container">
-    
-    <div class="collapse mb-4" id="settingsPanel">
-        <div class="card card-body bg-white shadow-sm">
-            <h5>⚙️ Configuration</h5>
-            <form action="/settings/update" method="post" class="row g-3">
-                
-                <div class="col-md-6">
-                    <label class="form-label">Active Model</label>
-                    <select class="form-select" name="model_name" onchange="this.form.submit()">
-                        <option value="gemini-2.5" {% if active_model == 'gemini-2.0-flash' %}selected{% endif %}>Gemini 2.5 Flash</option>
-                        <option value="gemini-3.0-flash-preview" {% if active_model == 'gemini-3.0-flash-preview' %}selected{% endif %}>Gemini 3.0 Flash Preview</option>
-                    </select>
-                </div>
-
-                <div class="col-md-6">
-                    <label class="form-label">Manage API Keys (Stored in Session)</label>
-                    <div class="input-group mb-2">
-                        <input type="text" class="form-control" name="new_api_key" placeholder="Paste new Google API Key">
-                        <button class="btn btn-primary" type="submit" name="action" value="add_key">Add</button>
-                    </div>
-                    
-                    {% if api_keys %}
-                        <div class="list-group">
-                            {% for key in api_keys %}
-                            <div class="list-group-item d-flex justify-content-between align-items-center p-2">
-                                <div>
-                                    {% if loop.index0 == active_index %}
-                                        <span class="badge bg-success me-2">Active</span>
-                                    {% else %}
-                                        <button class="btn btn-sm btn-outline-secondary me-2" type="submit" name="action" value="select_key">
-                                            Select
-                                            <input type="hidden" name="key_index" value="{{ loop.index0 }}">
-                                        </button>
-                                    {% endif %}
-                                    <small class="text-muted">Key ending in ...{{ key[-4:] }}</small>
-                                </div>
-                                <button class="btn btn-sm text-danger" type="submit" name="action" value="delete_key" onclick="this.form.querySelector('[name=key_index]').value='{{ loop.index0 }}'">
-                                    <i class="fas fa-trash"></i>
-                                </button>
-                            </div>
-                            {% endfor %}
-                        </div>
-                    {% else %}
-                        <small class="text-danger">No keys added. Using system default (.env) if available.</small>
-                    {% endif %}
+    <div class="card shadow-sm mb-4">
+        <div class="card-body">
+            <form action="/process" method="post" enctype="multipart/form-data">
+                <div class="upload-box text-center">
+                    <p class="mb-3">Select all your source files (Excel/CSV)</p>
+                    <input type="file" class="form-control mb-3" name="files" multiple required>
+                    <button class="btn btn-primary btn-lg w-100" type="submit">
+                        ✨ Unify Files Now
+                    </button>
                 </div>
             </form>
         </div>
     </div>
 
-    <div class="row">
-        <div class="col-md-12 mb-4">
-            <div class="card shadow-sm">
-                <div class="card-header bg-primary text-white">
-                    Step 1: Upload Data <small class="float-end">Running: {{ active_model }}</small>
-                </div>
-                <div class="card-body">
-                    <form action="/upload" method="post" enctype="multipart/form-data">
-                        <div class="input-group">
-                            <input type="file" class="form-control" name="files" multiple required>
-                            <button class="btn btn-dark" type="submit">Ingest Files</button>
-                        </div>
-                    </form>
-                </div>
-            </div>
-        </div>
-
-        {% if logs %}
-        <div class="col-md-12 mb-4">
-            <div class="alert alert-info">
-                <strong>Current Knowledge:</strong>
-                <ul class="mb-0">
-                    {% for log in logs %}
-                        <li>{{ log }}</li>
-                    {% endfor %}
-                </ul>
-            </div>
-        </div>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="alert alert-{{ category }} text-center">{{ message }}</div>
+            {% endfor %}
         {% endif %}
+    {% endwith %}
 
-        <div class="col-md-12">
-            {% with messages = get_flashed_messages(with_categories=true) %}
-                {% if messages %}
-                    {% for category, message in messages %}
-                        <div class="alert alert-{{ category }}">{{ message }}</div>
-                    {% endfor %}
-                {% endif %}
-            {% endwith %}
+    {% if download_file %}
+    <div class="card border-success shadow-lg">
+        <div class="card-header bg-success text-white text-center">
+            <h3>🎉 Mission Accomplished</h3>
         </div>
-
-        <div class="col-md-12">
-            <div class="card shadow-lg border-0">
-                <div class="card-header bg-success text-white">Step 2: Analysis</div>
-                <div class="card-body">
-                    <form action="/query" method="post">
-                        <div class="mb-3">
-                            <label class="form-label">Query</label>
-                            <textarea class="form-control" name="query_text" rows="3" placeholder="Join tables, analyze trends, create reports..."></textarea>
-                        </div>
-                        <button type="submit" class="btn btn-success w-100">Run Analysis</button>
-                    </form>
-                </div>
-            </div>
+        <div class="card-body text-center">
+            <p class="card-text">Your data has been analyzed, matched, and merged into a single master sheet.</p>
+            <a href="{{ url_for('main.download_file', filename=download_file) }}" class="btn btn-success btn-lg">
+                📥 Download Master File
+            </a>
+            <br><br>
+            <a href="/" class="text-muted text-decoration-none">Start Over</a>
         </div>
-
-        {% if download_file %}
-        <div class="col-md-12 mt-4 text-center">
-            <div class="card bg-warning bg-opacity-10 border-warning">
-                <div class="card-body">
-                    <h3>🎉 Report Generated!</h3>
-                    <p>{{ answer }}</p>
-                    <a href="{{ url_for('main.download_file', filename=download_file) }}" class="btn btn-primary btn-lg">📥 Download Result</a>
-                </div>
-            </div>
-        </div>
-        {% endif %}
     </div>
-</div>
+    {% endif %}
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</div>
 </body>
 </html>

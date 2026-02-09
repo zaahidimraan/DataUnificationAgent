@@ -4,100 +4,49 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
 from app.utils import setup_logger
 
-logger = setup_logger("intelligent_agent")
+logger = setup_logger("unification_engine")
 
-# Global storage (In a real app, use Redis/Database)
-DATA_MEMORY = {}
-
-class IntelligentDataAgent:
-    def __init__(self, api_key, model_name="gemini-2.0-flash-exp"):
-        """
-        Initialize the agent with a dynamic API Key and Model.
-        """
-        self.api_key = api_key
-        self.model_name = model_name
-        
-        # Initialize the LLM with the specific key and model
+class UnificationAgent:
+    def __init__(self):
+        # Using Gemini 2.5 Flash for speed and reasoning
         self.llm = ChatGoogleGenerativeAI(
-            model=self.model_name,
-            google_api_key=self.api_key,
+            model="gemini-2.5-flash", 
             temperature=0,
             convert_system_message_to_human=True
         )
 
-    def ingest_files(self, file_paths):
+    def unify_data(self, file_paths, output_folder):
         """
-        Phase 1: Ingest, Detect IDs, and Register Dataframes.
+        Loads all files and automatically merges them into a master file.
         """
-        global DATA_MEMORY
-        DATA_MEMORY.clear()
-        metadata_log = []
-
-        if not file_paths:
-            return ["❌ No files provided for ingestion"]
-
+        df_list = []
+        df_names = []
+        
+        # 1. Load all Excel sheets into DataFrames
         for path in file_paths:
-            if not os.path.exists(path):
-                continue
-            
-            filename = os.path.basename(path)
             try:
-                # Handle CSV and Excel
-                if filename.endswith('.csv'):
-                    xl = None
-                    # dict of {filename: df} for consistency
-                    dfs = {filename: pd.read_csv(path)}
-                else:
-                    xl = pd.ExcelFile(path)
-                    dfs = {sheet: xl.parse(sheet) for sheet in xl.sheet_names}
-
-                for sheet_name, df in dfs.items():
+                xl = pd.ExcelFile(path)
+                filename = os.path.basename(path)
+                
+                for sheet in xl.sheet_names:
+                    df = xl.parse(sheet)
                     if df.empty: continue
                     
-                    # Clean headers
+                    # Basic cleaning
                     df.columns = df.columns.astype(str).str.strip()
-
-                    # Ask Gemini to find the ID
-                    head_sample = df.head(3).to_markdown(index=False)
-                    prompt = f"""
-                    Analyze this data sample from '{filename}' (Sheet: '{sheet_name}'):
-                    {head_sample}
                     
-                    Task: Identify the unique 'Identifier' column (Primary Key).
-                    Return ONLY the column name string.
-                    """
+                    # Store DF and a helpful name for the LLM
+                    df_list.append(df)
+                    df_names.append(f"{filename} - Sheet: {sheet}")
                     
-                    try:
-                        response = self.llm.invoke(prompt)
-                        id_col = response.content.strip()
-                        
-                        if id_col not in df.columns:
-                            id_col = df.columns[0] # Fallback
-
-                        # Store in Memory
-                        unique_name = f"{filename}_{sheet_name}"
-                        DATA_MEMORY[unique_name] = df
-                        metadata_log.append(f"✅ Loaded '{unique_name}'. ID: '{id_col}'")
-                        
-                    except Exception as e:
-                        logger.error(f"LLM Error on {sheet_name}: {e}")
-                        metadata_log.append(f"⚠️ Error analyzing '{sheet_name}': {e}")
-
             except Exception as e:
-                metadata_log.append(f"❌ Failed to read {filename}: {e}")
-        
-        return metadata_log
+                logger.error(f"Error reading {path}: {e}")
+                return False, f"Failed to read file: {os.path.basename(path)}"
 
-    def query_data(self, user_query):
-        """
-        Phase 2: The Analyst.
-        Returns: (Success_Bool, Result_Text_or_Error)
-        """
-        if not DATA_MEMORY:
-            return False, "No data loaded. Please upload files first."
+        if not df_list:
+            return False, "No valid data found in uploaded files."
 
-        df_list = list(DATA_MEMORY.values())
-        
+        # 2. Create the Pandas Agent
         agent = create_pandas_dataframe_agent(
             self.llm,
             df_list,
@@ -106,23 +55,36 @@ class IntelligentDataAgent:
             agent_executor_kwargs={"handle_parsing_errors": True}
         )
 
-        output_path = os.path.join(os.getcwd(), 'outputs', 'query_result.xlsx')
+        output_file = 'master_unified_data.xlsx'
+        output_path = os.path.join(output_folder, output_file)
+
+        # 3. The "Auto-Pilot" Prompt
+        # We give the LLM the list of sheet names so it understands the context (e.g., "Flats" vs "Repairs")
+        context_str = "\n".join(df_names)
         
-        full_prompt = f"""
-        You are an Expert Data Analyst using {self.model_name}.
-        You have access to {len(df_list)} tables.
+        prompt = f"""
+        You are an Autonomous Data Unification Bot.
         
-        User Query: "{user_query}"
+        I have loaded {len(df_list)} data tables. Here are their sources:
+        {context_str}
         
-        Steps:
-        1. Identify common keys across tables.
-        2. Merge/Aggregate data to answer the query.
-        3. **CRITICAL**: Save the result to Excel at: '{output_path}'
-        4. If successful, reply exactly: "SUCCESS: File generated."
+        YOUR MISSION:
+        1. Analyze the columns to find common Identifiers (e.g., 'ID', 'Ref', 'Code').
+        2. Merge ALL these tables into a single 'Master DataFrame'. 
+           - If there are multiple master lists (like Flats and Villas), append/concat them first.
+           - Then merge that combined list with any Transaction/History/Repair logs.
+        3. Ensure no data is lost (use outer joins if necessary).
+        4. **CRITICAL**: Save the final result to an Excel file at: '{output_path}'
+        5. If successful, return the string: "SUCCESS_DONE"
         """
-        
+
         try:
-            response = agent.invoke(full_prompt)
-            return True, response['output']
+            response = agent.invoke(prompt)
+            
+            if os.path.exists(output_path):
+                return True, output_file
+            else:
+                return False, f"Agent finished but file was not saved. Output: {response['output']}"
+                
         except Exception as e:
-            return False, f"Query failed: {str(e)}"
+            return False, f"Unification failed: {str(e)}"
