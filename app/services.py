@@ -26,6 +26,12 @@ class AgentState(TypedDict):
     id_retries: int
     has_one_to_many: bool
     
+    # Phase 1.5: One-to-Many Resolution State (NEW)
+    one_to_many_detected: bool
+    one_to_many_resolution: str  # 'auto_solve', 'aggregate_max', 'aggregate_min', 'aggregate_sum', 'aggregate_avg', 'multi_file'
+    aggregation_strategy: str  # LLM's recommended strategy
+    user_intent: str  # What user wants to achieve
+    
     # Phase 2: Schema State
     schema: str
     schema_feedback: str
@@ -496,17 +502,36 @@ OUTPUT (JSON):
         
         safe_output_path = os.path.join(state['output_folder'], 'master_unified_data.xlsx').replace("\\", "/")
         
+        # Include aggregation strategy if one-to-many detected
+        aggregation_section = ""
+        if state.get("one_to_many_detected"):
+            strategy = state.get("aggregation_strategy", "MULTI_FILE")
+            aggregation_section = f"""
+ONE-TO-MANY AGGREGATION STRATEGY: {strategy}
+
+When merging master and detail records:
+- If {strategy}: Use pandas agg() to {strategy.replace('AGGREGATE_', '').lower()} detail values per master record
+- If MULTI_FILE: Create separate files instead of merging
+
+For aggregation:
+  - AGGREGATE_MAX: df.groupby('MASTER_UID').max()
+  - AGGREGATE_MIN: df.groupby('MASTER_UID').min()
+  - AGGREGATE_SUM: df.groupby('MASTER_UID').sum()
+  - AGGREGATE_AVG: df.groupby('MASTER_UID').mean()
+  - AGGREGATE_COUNT: df.groupby('MASTER_UID').size()
+"""
+        
         prompt = f"""Generate Python code to implement the schema.
 
 SCHEMA:
-{state['schema']}
+{state['schema']}{aggregation_section}
 
 FILES:
 {state['file_paths']}
 
 RULES:
-- NEVER use drop_duplicates(), deduplicate, or select first/last record
-- Preserve ALL records (one-to-many must not collapse)
+- NEVER use drop_duplicates(), deduplicate, or select first/last record (unless aggregating per strategy)
+- Preserve ALL records UNLESS explicitly aggregating per strategy
 - Handle missing columns with .get() and fillna('<missing>')
 - Convert keys to string: astype(str).str.strip()
 - Create MASTER_UID by concatenating keys with '_'
@@ -646,28 +671,118 @@ OUTPUT: Python code only, no markdown."""
             "execution_error": state.get("validation_errors", "Data validation failed")
         }
     
+    def node_one_to_many_resolver(self, state: AgentState):
+        """Intelligent handler for one-to-many relationships with user choice."""
+        logger.warning("")
+        logger.warning("⚠️  " + "="*55)
+        logger.warning("⚠️  ONE-TO-MANY RELATIONSHIP DETECTED")
+        logger.warning("⚠️  " + "="*55)
+        logger.warning("")
+        logger.warning("📊 Your data contains different granularities:")
+        logger.warning("   - Master/reference data (one record per entity)")
+        logger.warning("   - Detail/transaction data (multiple records per entity)")
+        logger.warning("")
+        
+        # Check if user has already provided resolution choice
+        user_choice = state.get("one_to_many_resolution", "")
+        
+        if user_choice == "auto_solve":
+            logger.info("🤖 AUTO-SOLVE MODE: LLM will intelligently aggregate data")
+            logger.info("   Analyzing data structure to determine best aggregation...")
+            
+            # LLM decides best aggregation strategy
+            prompt = f"""Analyze this data structure and recommend the BEST aggregation strategy.
+
+IDENTIFIERS:
+{state['identifiers']}
+
+DATA:
+{state['dfs_sample_str']}
+
+Your data has one-to-many relationships. Choose ONE strategy:
+1. AGGREGATE_MAX: Keep maximum values from detail records
+2. AGGREGATE_MIN: Keep minimum values from detail records  
+3. AGGREGATE_SUM: Sum all detail record values
+4. AGGREGATE_AVG: Average all detail record values
+5. AGGREGATE_COUNT: Count detail records per master
+6. MULTI_FILE: Keep master and detail separate (normalized design)
+
+Considering the data nature and business logic:
+- Choose MULTI_FILE if relationships are critical to preserve
+- Choose AGGREGATE_* if you want a single flat file with aggregated metrics
+
+REQUIREMENT: You MUST recommend ONE and ONLY ONE strategy.
+
+OUTPUT (JSON):
+{{
+  "recommended_strategy": "<AGGREGATE_MAX, AGGREGATE_MIN, AGGREGATE_SUM, AGGREGATE_AVG, AGGREGATE_COUNT, or MULTI_FILE>",
+  "reasoning": "<Why this is best for this data>"
+}}
+"""
+            
+            response = self.llm.invoke(prompt).content
+            
+            try:
+                json_str = response.strip()
+                if "```json" in json_str:
+                    json_str = json_str.split("```json")[1].split("```")[0].strip()
+                elif "```" in json_str:
+                    json_str = json_str.split("```")[1].split("```")[0].strip()
+                
+                result = json.loads(json_str)
+                strategy = result.get("recommended_strategy", "MULTI_FILE")
+                reasoning = result.get("reasoning", "")
+                
+                logger.info(f"✅ LLM Recommendation: {strategy}")
+                logger.info(f"   Reasoning: {reasoning}")
+                
+            except Exception as e:
+                logger.warning(f"⚠️  Could not parse LLM recommendation: {e}")
+                strategy = "MULTI_FILE"  # Fallback to safe option
+            
+            return {
+                "one_to_many_detected": True,
+                "one_to_many_resolution": strategy,
+                "aggregation_strategy": strategy,
+                "user_intent": "auto_solve"
+            }
+        
+        elif user_choice in ["aggregate_max", "aggregate_min", "aggregate_sum", "aggregate_avg", "aggregate_count", "multi_file"]:
+            logger.info(f"👤 USER CHOICE RECEIVED: {user_choice}")
+            logger.info(f"   Schema will be adapted to: {user_choice}")
+            
+            return {
+                "one_to_many_detected": True,
+                "one_to_many_resolution": user_choice,
+                "aggregation_strategy": user_choice,
+                "user_intent": user_choice
+            }
+        
+        else:
+            # No choice yet - signal to return to UI
+            logger.warning("⏸️  WAITING FOR USER DECISION")
+            logger.warning("   UI should show resolution options to user")
+            
+            return {
+                "one_to_many_detected": True,
+                "one_to_many_resolution": "awaiting_user_choice",
+                "aggregation_strategy": ""
+            }
+
     def node_one_to_many_stop(self, state: AgentState):
-        """Stops processing when one-to-many relationships are detected."""
-        logger.error("")
-        logger.error("⛔ " + "="*55)
-        logger.error("⛔ PROCESS STOPPED: ONE-TO-MANY RELATIONSHIP DETECTED")
-        logger.error("⛔ " + "="*55)
-        logger.error("")
-        logger.error("📊 Your data contains different granularities:")
-        logger.error("   - Master/reference data (one record per entity)")
-        logger.error("   - Transaction/detail data (multiple records per entity)")
-        logger.error("")
-        logger.error("❌ Cannot merge into a single flat file without data loss")
-        logger.error("")
-        logger.error("💡 SOLUTION OPTIONS:")
-        logger.error("   1. Upload only master-level files (same granularity)")
-        logger.error("   2. Use a database or data warehouse for complex relationships")
-        logger.error("   3. Process files separately and maintain relationships manually")
-        logger.error("")
+        """Stops processing when user chooses multi-file or system defaults to it."""
+        logger.warning("")
+        logger.warning("📋 MULTI-FILE STRUCTURE SELECTED")
+        logger.warning("")
+        logger.warning("Your data will be normalized into separate files:")
+        logger.warning("   - Master files (one record per entity)")
+        logger.warning("   - Detail files (many records per entity)")
+        logger.warning("   - Relationships.txt (describing relationships)")
+        logger.warning("")
         
         return {
-            "execution_result": "FAILED",
-            "execution_error": "One-to-many relationships detected. Cannot create single file without data loss. Please upload files with same granularity only."
+            "execution_result": "MULTI_FILE",
+            "execution_error": ""
         }
 
     # ============================================================
@@ -682,7 +797,8 @@ OUTPUT: Python code only, no markdown."""
         workflow.add_node("validation_stop", self.node_validation_failed)  # Validation failure
         workflow.add_node("identifier", self.node_identifier)
         workflow.add_node("id_evaluator", self.node_id_evaluator)
-        workflow.add_node("one_to_many_stop", self.node_one_to_many_stop)
+        workflow.add_node("one_to_many_resolver", self.node_one_to_many_resolver)  # NEW: Smart resolution
+        workflow.add_node("one_to_many_stop", self.node_one_to_many_stop)  # Multi-file fallback
         workflow.add_node("schema_maker", self.node_schema_maker)
         workflow.add_node("schema_evaluator", self.node_schema_evaluator)
         workflow.add_node("code_generator", self.node_code_generator)
@@ -723,10 +839,10 @@ OUTPUT: Python code only, no markdown."""
             
             # Check for one-to-many relationships first
             if has_one_to_many and (confidence >= 90 or retries >= 3):
-                logger.error("")
-                logger.error("🛑 STOPPING: One-to-many relationships cannot be merged into single file")
-                logger.error("")
-                return "one_to_many_stop"
+                logger.info("")
+                logger.info("🎯 ONE-TO-MANY RELATIONSHIP DETECTED - Routing to resolver")
+                logger.info("")
+                return "one_to_many_resolver"
             
             if confidence >= 90 or retries >= 3:
                 logger.info("")
@@ -746,7 +862,34 @@ OUTPUT: Python code only, no markdown."""
             {
                 "schema_maker": "schema_maker",
                 "identifier": "identifier",
-                "one_to_many_stop": "one_to_many_stop"  # NEW route
+                "one_to_many_resolver": "one_to_many_resolver"  # NEW route
+            }
+        )
+        
+        # Phase 1.5: One-to-Many Resolution
+        def route_after_one_to_many_resolution(state):
+            """Route based on one-to-many resolution strategy."""
+            resolution = state.get("one_to_many_resolution", "")
+            
+            if resolution == "awaiting_user_choice":
+                # Signal should be caught by UI/routes to show modal and wait
+                logger.warning("⏸️  PAUSED: Waiting for user choice on one-to-many resolution")
+                return END  # Pause graph execution
+            elif resolution == "multi_file":
+                logger.info("📋 User selected: Multi-file (normalized) structure")
+                return "one_to_many_stop"
+            else:
+                # User selected an aggregation strategy - proceed to schema with it
+                logger.info(f"✅ Resolution strategy: {resolution}")
+                return "schema_maker"
+        
+        workflow.add_conditional_edges(
+            "one_to_many_resolver",
+            route_after_one_to_many_resolution,
+            {
+                "schema_maker": "schema_maker",
+                "one_to_many_stop": "one_to_many_stop",
+                END: END
             }
         )
         
@@ -841,8 +984,17 @@ OUTPUT: Python code only, no markdown."""
     # MAIN ENTRY POINT
     # ============================================================
     
-    def run(self, file_paths, output_folder):
-        """Main entry point for the agent."""
+    def run(self, file_paths, output_folder, one_to_many_choice=""):
+        """Main entry point for the agent.
+        
+        Args:
+            file_paths: List of file paths to unify
+            output_folder: Output directory for results
+            one_to_many_choice: User's choice for one-to-many resolution ('auto_solve', 'aggregate_max', etc.)
+        
+        Returns:
+            Tuple of (success: bool, message: str, final_state: dict)
+        """
         logger.info("")
         logger.info("🚀 " + "="*55)
         logger.info("🚀 MULTI-STAGE REFLEXION AGENT - STARTING")
@@ -851,6 +1003,9 @@ OUTPUT: Python code only, no markdown."""
         logger.info(f"📂 Files to process: {len(file_paths)}")
         for i, path in enumerate(file_paths, 1):
             logger.info(f"   {i}. {os.path.basename(path)}")
+        
+        if one_to_many_choice:
+            logger.info(f"👤 One-to-many resolution choice: {one_to_many_choice}")
         logger.info("")
         
         samples = self._load_samples(file_paths)
@@ -870,7 +1025,13 @@ OUTPUT: Python code only, no markdown."""
             "id_feedback": "",
             "id_confidence": 0.0,
             "id_retries": 0,
-            "has_one_to_many": False,  # NEW: Track one-to-many detection
+            "has_one_to_many": False,
+            
+            # Phase 1.5: One-to-Many Resolution State (NEW)
+            "one_to_many_detected": False,
+            "one_to_many_resolution": one_to_many_choice or "",  # Pre-set if user provided choice
+            "aggregation_strategy": "",
+            "user_intent": one_to_many_choice or "",
             
             # Phase 2 state
             "schema": "",
@@ -895,6 +1056,8 @@ OUTPUT: Python code only, no markdown."""
         logger.info(f"   Phase 1 (Identification) attempts: {final_state.get('id_retries', 0)}")
         logger.info(f"   Phase 2 (Schema) attempts: {final_state.get('schema_retries', 0)}")
         logger.info(f"   Phase 3 (Execution) attempts: {final_state.get('execution_retries', 0)}")
+        if final_state.get('one_to_many_detected'):
+            logger.info(f"   One-to-many detected: {final_state.get('one_to_many_resolution', 'N/A')}")
         logger.info("")
         
         if final_state["execution_result"] == "SUCCESS":
@@ -902,7 +1065,7 @@ OUTPUT: Python code only, no markdown."""
             logger.info("✅ UNIFICATION COMPLETED SUCCESSFULLY!")
             logger.info("✅ " + "="*55)
             logger.info("")
-            return True, "master_unified_data.xlsx"
+            return True, "master_unified_data.xlsx", final_state
         else:
             error_msg = final_state.get("execution_error", "Unknown error")
             logger.error("❌ " + "="*55)
@@ -910,4 +1073,4 @@ OUTPUT: Python code only, no markdown."""
             logger.error(f"❌ Error: {error_msg}")
             logger.error("❌ " + "="*55)
             logger.error("")
-            return False, error_msg
+            return False, error_msg, final_state

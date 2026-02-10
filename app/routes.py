@@ -1,11 +1,16 @@
 import os
 import shutil
-from flask import Blueprint, render_template, request, current_app, send_from_directory, flash, redirect, url_for
+import json
+import tempfile
+from flask import Blueprint, render_template, request, current_app, send_from_directory, flash, redirect, url_for, session
 from werkzeug.utils import secure_filename
 from app.services import UnificationGraphAgent
 from app.utils import log_info, log_error, log_warning
 
 main_bp = Blueprint('main', __name__)
+
+# Store graph states temporarily (in production, use Redis or database)
+_graph_states = {}
 
 # Initialize the LangGraph Agent
 agent = UnificationGraphAgent()
@@ -66,11 +71,26 @@ def process_files():
 
     log_info(f"✅ {len(saved_paths)} file(s) saved successfully")
 
-    # 3. Run LangGraph Agent
+    # 3. Check for one-to-many resolution choice
+    one_to_many_choice = request.form.get('one_to_many_choice', '')
+    log_info(f"One-to-many choice from form: '{one_to_many_choice}'")
+
+    # 4. Run LangGraph Agent
     try:
         log_info("🔄 Starting LangGraph agent for data unification")
-        # The agent now handles the loop internally
-        success, result = agent.run(saved_paths, output_dir)
+        # Pass the one-to-many choice if provided
+        success, result, state = agent.run(saved_paths, output_dir, one_to_many_choice)
+        
+        # Check if one-to-many was detected and user hasn't chosen
+        if not success and state.get("one_to_many_detected") and state.get("one_to_many_resolution") == "awaiting_user_choice":
+            log_info("⏸️  One-to-many detected - showing user options")
+            flash("⚠️  One-to-many relationships detected in your data!", "warning")
+            return render_template('index.html', 
+                                 show_one_to_many_modal=True,
+                                 one_to_many_detected=True,
+                                 saved_files=saved_paths,
+                                 upload_dir=upload_dir,
+                                 output_dir=output_dir)
         
         if success:
             log_info("✅ LangGraph agent processing completed successfully")
