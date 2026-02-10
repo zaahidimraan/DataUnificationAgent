@@ -59,8 +59,8 @@
                     <p class="mt-4 mb-3"><strong>How would you like to proceed?</strong></p>
 
                     <form action="/process" method="post" enctype="multipart/form-data" id="oneToManyForm">
-                        <!-- Hidden input to preserve files -->
-                        <input type="hidden" name="files" id="hiddenFiles" value="">
+                        <!-- Pass session ID to retrieve stored files -->
+                        <input type="hidden" name="session_id" value="{{ session_id }}">
                         
                         <!-- Auto-Solve Option -->
                         <label class="option-card">
@@ -113,15 +113,6 @@
                             <div class="option-content">
                                 <strong>🔢 Aggregate - Count Records</strong>
                                 <p class="text-muted small mt-2">For each master record, COUNT how many detail records exist</p>
-                            </div>
-                        </label>
-
-                        <!-- Multi-File Option -->
-                        <label class="option-card">
-                            <input type="radio" name="one_to_many_choice" value="multi_file">
-                            <div class="option-content">
-                                <strong>📁 Keep Separate Files (Normalized)</strong>
-                                <p class="text-muted small mt-2">Preserve data integrity by keeping master and detail in separate files with relationships</p>
                             </div>
                         </label>
 

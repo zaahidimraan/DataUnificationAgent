@@ -705,17 +705,14 @@ Your data has one-to-many relationships. Choose ONE strategy:
 3. AGGREGATE_SUM: Sum all detail record values
 4. AGGREGATE_AVG: Average all detail record values
 5. AGGREGATE_COUNT: Count detail records per master
-6. MULTI_FILE: Keep master and detail separate (normalized design)
 
-Considering the data nature and business logic:
-- Choose MULTI_FILE if relationships are critical to preserve
-- Choose AGGREGATE_* if you want a single flat file with aggregated metrics
+Considering the data nature and business logic, choose the BEST ONE ONLY.
 
 REQUIREMENT: You MUST recommend ONE and ONLY ONE strategy.
 
 OUTPUT (JSON):
 {{
-  "recommended_strategy": "<AGGREGATE_MAX, AGGREGATE_MIN, AGGREGATE_SUM, AGGREGATE_AVG, AGGREGATE_COUNT, or MULTI_FILE>",
+  "recommended_strategy": "<AGGREGATE_MAX, AGGREGATE_MIN, AGGREGATE_SUM, AGGREGATE_AVG, or AGGREGATE_COUNT>",
   "reasoning": "<Why this is best for this data>"
 }}
 """
@@ -730,7 +727,7 @@ OUTPUT (JSON):
                     json_str = json_str.split("```")[1].split("```")[0].strip()
                 
                 result = json.loads(json_str)
-                strategy = result.get("recommended_strategy", "MULTI_FILE")
+                strategy = result.get("recommended_strategy", "AGGREGATE_SUM")
                 reasoning = result.get("reasoning", "")
                 
                 logger.info(f"✅ LLM Recommendation: {strategy}")
@@ -738,8 +735,9 @@ OUTPUT (JSON):
                 
             except Exception as e:
                 logger.warning(f"⚠️  Could not parse LLM recommendation: {e}")
-                strategy = "MULTI_FILE"  # Fallback to safe option
+                strategy = "AGGREGATE_SUM"  # Fallback to safe option
             
+            logger.info("✅ Auto-solve complete - proceeding with aggregation")
             return {
                 "one_to_many_detected": True,
                 "one_to_many_resolution": strategy,
@@ -747,9 +745,10 @@ OUTPUT (JSON):
                 "user_intent": "auto_solve"
             }
         
-        elif user_choice in ["aggregate_max", "aggregate_min", "aggregate_sum", "aggregate_avg", "aggregate_count", "multi_file"]:
+        elif user_choice in ["aggregate_max", "aggregate_min", "aggregate_sum", "aggregate_avg", "aggregate_count"]:
             logger.info(f"👤 USER CHOICE RECEIVED: {user_choice}")
-            logger.info(f"   Schema will be adapted to: {user_choice}")
+            logger.info(f"   Data will be aggregated using: {user_choice}")
+            logger.info("✅ Proceeding with user selection")
             
             return {
                 "one_to_many_detected": True,
@@ -761,29 +760,13 @@ OUTPUT (JSON):
         else:
             # No choice yet - signal to return to UI
             logger.warning("⏸️  WAITING FOR USER DECISION")
-            logger.warning("   UI should show resolution options to user")
+            logger.warning("   UI will show resolution options to user")
             
             return {
                 "one_to_many_detected": True,
                 "one_to_many_resolution": "awaiting_user_choice",
                 "aggregation_strategy": ""
             }
-
-    def node_one_to_many_stop(self, state: AgentState):
-        """Stops processing when user chooses multi-file or system defaults to it."""
-        logger.warning("")
-        logger.warning("📋 MULTI-FILE STRUCTURE SELECTED")
-        logger.warning("")
-        logger.warning("Your data will be normalized into separate files:")
-        logger.warning("   - Master files (one record per entity)")
-        logger.warning("   - Detail files (many records per entity)")
-        logger.warning("   - Relationships.txt (describing relationships)")
-        logger.warning("")
-        
-        return {
-            "execution_result": "MULTI_FILE",
-            "execution_error": ""
-        }
 
     # ============================================================
     # GRAPH BUILDER
@@ -797,8 +780,7 @@ OUTPUT (JSON):
         workflow.add_node("validation_stop", self.node_validation_failed)  # Validation failure
         workflow.add_node("identifier", self.node_identifier)
         workflow.add_node("id_evaluator", self.node_id_evaluator)
-        workflow.add_node("one_to_many_resolver", self.node_one_to_many_resolver)  # NEW: Smart resolution
-        workflow.add_node("one_to_many_stop", self.node_one_to_many_stop)  # Multi-file fallback
+        workflow.add_node("one_to_many_resolver", self.node_one_to_many_resolver)  # Smart resolution
         workflow.add_node("schema_maker", self.node_schema_maker)
         workflow.add_node("schema_evaluator", self.node_schema_evaluator)
         workflow.add_node("code_generator", self.node_code_generator)
@@ -872,15 +854,13 @@ OUTPUT (JSON):
             resolution = state.get("one_to_many_resolution", "")
             
             if resolution == "awaiting_user_choice":
-                # Signal should be caught by UI/routes to show modal and wait
-                logger.warning("⏸️  PAUSED: Waiting for user choice on one-to-many resolution")
-                return END  # Pause graph execution
-            elif resolution == "multi_file":
-                logger.info("📋 User selected: Multi-file (normalized) structure")
-                return "one_to_many_stop"
+                # User hasn't chosen yet - pause and show UI
+                logger.warning("⏸️  PAUSED: Waiting for user input")
+                logger.warning("    User should receive modal and resubmit with choice")
+                return END  # Pause graph execution, UI will resubmit
             else:
-                # User selected an aggregation strategy - proceed to schema with it
-                logger.info(f"✅ Resolution strategy: {resolution}")
+                # User selection received or auto-solve completed
+                logger.info("✅ Aggregation strategy confirmed - proceeding to schema design")
                 return "schema_maker"
         
         workflow.add_conditional_edges(
@@ -888,13 +868,9 @@ OUTPUT (JSON):
             route_after_one_to_many_resolution,
             {
                 "schema_maker": "schema_maker",
-                "one_to_many_stop": "one_to_many_stop",
                 END: END
             }
         )
-        
-        # Edge from one-to-many stop node to END
-        workflow.add_edge("one_to_many_stop", END)
         
         # Phase 2: Schema Loop
         workflow.add_edge("schema_maker", "schema_evaluator")

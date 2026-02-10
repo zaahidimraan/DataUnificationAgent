@@ -1,6 +1,7 @@
 import os
 import shutil
 import json
+import pickle
 import tempfile
 from flask import Blueprint, render_template, request, current_app, send_from_directory, flash, redirect, url_for, session
 from werkzeug.utils import secure_filename
@@ -9,8 +10,8 @@ from app.utils import log_info, log_error, log_warning
 
 main_bp = Blueprint('main', __name__)
 
-# Store graph states temporarily (in production, use Redis or database)
-_graph_states = {}
+# Store uploaded file paths temporarily between requests
+_pending_uploads = {}
 
 # Initialize the LangGraph Agent
 agent = UnificationGraphAgent()
@@ -27,70 +28,97 @@ def index():
 def process_files():
     log_info("🚀 Data unification process started")
     
-    if 'files' not in request.files:
-        log_error("❌ No files uploaded")
+    # Check if this is a modal response (one_to_many_choice without files)
+    one_to_many_choice = request.form.get('one_to_many_choice', '')
+    has_files = 'files' in request.files and len(request.files.getlist('files')) > 0
+    
+    if has_files:
+        # FIRST SUBMISSION: New file upload
+        log_info("📝 Processing: FIRST SUBMISSION (file upload)")
+        
+        files = request.files.getlist('files')
+        log_info(f"📥 Received {len(files)} file(s)")
+        
+        # 1. Setup Workspace
+        upload_dir = current_app.config['UPLOAD_FOLDER']
+        output_dir = current_app.config['OUTPUT_FOLDER']
+        
+        log_info(f"📁 Cleaning upload and output directories")
+        # Reset directories for single-user mode
+        for folder in [upload_dir, output_dir]:
+            if os.path.exists(folder):
+                shutil.rmtree(folder)
+            os.makedirs(folder, exist_ok=True)
+
+        saved_paths = []
+        
+        # 2. Save Files
+        for file in files:
+            if file.filename == '' or not allowed_file(file.filename):
+                log_warning(f"⚠️  Skipped invalid file: {file.filename}")
+                continue
+                
+            try:
+                filename = secure_filename(file.filename)
+                path = os.path.join(upload_dir, filename)
+                file.save(path)
+                saved_paths.append(path)
+                log_info(f"✅ File saved: {filename}")
+            except Exception as e:
+                log_error(f"❌ Error saving {file.filename}: {str(e)}")
+                flash(f"Error saving {file.filename}", "danger")
+
+        if not saved_paths:
+            log_error("❌ No valid files to process")
+            flash('No valid files uploaded.', 'danger')
+            return redirect(url_for('main.index'))
+
+        log_info(f"✅ {len(saved_paths)} file(s) saved successfully")
+        
+    elif one_to_many_choice:
+        # SECOND SUBMISSION: Modal response with user choice
+        log_info("📝 Processing: SECOND SUBMISSION (modal response)")
+        log_info(f"👤 User selected: {one_to_many_choice}")
+        
+        # Retrieve stored file paths
+        session_id = request.form.get('session_id', '')
+        if not session_id or session_id not in _pending_uploads:
+            log_error("❌ Session data not found - files were lost")
+            flash('Session expired. Please upload files again.', 'danger')
+            return redirect(url_for('main.index'))
+        
+        saved_paths = _pending_uploads[session_id]
+        output_dir = current_app.config['OUTPUT_FOLDER']
+        
+        log_info(f"📁 Restoring {len(saved_paths)} files from session")
+        
+    else:
+        # No files and no choice
+        log_error("❌ No files uploaded and no choice provided")
         flash('No file part', 'danger')
         return redirect(url_for('main.index'))
-    
-    files = request.files.getlist('files')
-    log_info(f"📥 Received {len(files)} file(s)")
-    
-    # 1. Setup Workspace
-    upload_dir = current_app.config['UPLOAD_FOLDER']
+
+    # Continue with processing
     output_dir = current_app.config['OUTPUT_FOLDER']
-    
-    log_info(f"📁 Cleaning upload and output directories")
-    # Reset directories for single-user mode
-    for folder in [upload_dir, output_dir]:
-        if os.path.exists(folder):
-            shutil.rmtree(folder)
-        os.makedirs(folder, exist_ok=True)
 
-    saved_paths = []
-    
-    # 2. Save Files
-    for file in files:
-        if file.filename == '' or not allowed_file(file.filename):
-            log_warning(f"⚠️  Skipped invalid file: {file.filename}")
-            continue
-            
-        try:
-            filename = secure_filename(file.filename)
-            path = os.path.join(upload_dir, filename)
-            file.save(path)
-            saved_paths.append(path)
-            log_info(f"✅ File saved: {filename}")
-        except Exception as e:
-            log_error(f"❌ Error saving {file.filename}: {str(e)}")
-            flash(f"Error saving {file.filename}", "danger")
-
-    if not saved_paths:
-        log_error("❌ No valid files to process")
-        flash('No valid files uploaded.', 'danger')
-        return redirect(url_for('main.index'))
-
-    log_info(f"✅ {len(saved_paths)} file(s) saved successfully")
-
-    # 3. Check for one-to-many resolution choice
-    one_to_many_choice = request.form.get('one_to_many_choice', '')
-    log_info(f"One-to-many choice from form: '{one_to_many_choice}'")
-
-    # 4. Run LangGraph Agent
+    # 3. Run LangGraph Agent
     try:
         log_info("🔄 Starting LangGraph agent for data unification")
-        # Pass the one-to-many choice if provided
         success, result, state = agent.run(saved_paths, output_dir, one_to_many_choice)
         
-        # Check if one-to-many was detected and user hasn't chosen
+        # Check if one-to-many was detected and user hasn't chosen yet
         if not success and state.get("one_to_many_detected") and state.get("one_to_many_resolution") == "awaiting_user_choice":
+            session_id = os.urandom(16).hex()
+            _pending_uploads[session_id] = saved_paths
+            
             log_info("⏸️  One-to-many detected - showing user options")
+            log_info(f"   Stored session: {session_id}")
+            
             flash("⚠️  One-to-many relationships detected in your data!", "warning")
             return render_template('index.html', 
                                  show_one_to_many_modal=True,
                                  one_to_many_detected=True,
-                                 saved_files=saved_paths,
-                                 upload_dir=upload_dir,
-                                 output_dir=output_dir)
+                                 session_id=session_id)
         
         if success:
             log_info("✅ LangGraph agent processing completed successfully")
