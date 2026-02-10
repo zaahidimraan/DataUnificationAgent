@@ -396,22 +396,25 @@ IDENTIFIERS:
 DATA:
 {state['dfs_sample_str']}
 
-CRITICAL: If data has MASTER + DETAIL files, they CANNOT merge into one file. State multi-file output.
+CRITICAL: ALWAYS CREATE SINGLE FILE OUTPUT. Even if data has MASTER+DETAIL:
+- For numeric fields: apply aggregation (sum, avg, min, max, count)
+- For text fields: randomly select from aggregated rows (or first value for MAX/MIN)
+- Result: ONE row per master record
 
 REQUIREMENTS:
 1. Analyze granularity: All same level or mixed?  
 2. Define key columns and Master UID formula
-3. List value columns to keep
-4. State SINGLE FILE (if same granularity) or MULTI-FILE (if mixed)
+3. List all value columns to keep (will be aggregated smartly)
+4. ALWAYS state SINGLE FILE (even if granularity is mixed with master+detail)
 
 {feedback_context}
 
 OUTPUT:
 # GRANULARITY
-<All same OR mixed (master+detail)>
+<All same level OR mixed (master+detail) - doesn't matter, output is single file>
 
 # STRATEGY
-<Single file OR Multi-file with reason>
+<Always: Single file with smart aggregation per data type>
 
 # KEYS
 <Key columns + Master_UID formula>
@@ -505,20 +508,35 @@ OUTPUT (JSON):
         # Include aggregation strategy if one-to-many detected
         aggregation_section = ""
         if state.get("one_to_many_detected"):
-            strategy = state.get("aggregation_strategy", "MULTI_FILE")
-            aggregation_section = f"""
+                strategy = state.get("aggregation_strategy", "AGGREGATE_SUM")
+            
+                # Map strategy to aggregation type
+                agg_type = strategy.replace('AGGREGATE_', '').lower()
+            
+                aggregation_section = f"""
 ONE-TO-MANY AGGREGATION STRATEGY: {strategy}
 
-When merging master and detail records:
-- If {strategy}: Use pandas agg() to {strategy.replace('AGGREGATE_', '').lower()} detail values per master record
-- If MULTI_FILE: Create separate files instead of merging
+⚠️ CRITICAL RULES FOR SINGLE FILE OUTPUT:
+1. ALWAYS create ONE file only, even if there's data loss
+2. For NUMERIC fields:
+    - Apply {agg_type} using groupby aggregation
+    - {agg_type}.upper() = sum/avg/min/max/count values per master record
+3. For TEXT/DATE fields:
+    - If strategy is MAX/MIN: use that strategy
+    - Otherwise: Use RANDOM selection from aggregated rows (random.choice on unique values)
+    - Include complete row data with the selected value
+4. For fields that can't be aggregated properly:
+    - Leave empty or use first non-null value
+5. DO NOT create multiple files
+6. DO NOT preserve all detail records as separate rows
+7. Result: ONE row per master record with aggregated/selected values
 
-For aggregation:
-  - AGGREGATE_MAX: df.groupby('MASTER_UID').max()
-  - AGGREGATE_MIN: df.groupby('MASTER_UID').min()
-  - AGGREGATE_SUM: df.groupby('MASTER_UID').sum()
-  - AGGREGATE_AVG: df.groupby('MASTER_UID').mean()
-  - AGGREGATE_COUNT: df.groupby('MASTER_UID').size()
+Aggregation mapping:
+  - AGGREGATE_MAX: df.groupby('MASTER_UID').max() (or random for text)
+  - AGGREGATE_MIN: df.groupby('MASTER_UID').min() (or random for text)
+  - AGGREGATE_SUM: df.groupby('MASTER_UID').sum() (or random for text)
+  - AGGREGATE_AVG: df.groupby('MASTER_UID').mean() (or random for text)
+  - AGGREGATE_COUNT: Use df.groupby('MASTER_UID').size() for counts + random for text fields
 """
         
         prompt = f"""Generate Python code to implement the schema.
@@ -529,27 +547,33 @@ SCHEMA:
 FILES:
 {state['file_paths']}
 
-RULES:
-- NEVER use drop_duplicates(), deduplicate, or select first/last record (unless aggregating per strategy)
-- Preserve ALL records UNLESS explicitly aggregating per strategy
-- Handle missing columns with .get() and fillna('<missing>')
-- Convert keys to string: astype(str).str.strip()
-- Create MASTER_UID by concatenating keys with '_'
+CRITICAL REQUIREMENTS:
+1. ALWAYS output EXACTLY ONE file to '{safe_output_path}'
+2. NEVER create multiple files
+3. NEVER preserve all detail rows as separate records
+4. FOCUS: Create one unified master file with aggregated/merged data
 
-SINGLE FILE (if same granularity):
+For one-to-many data:
+- Group by master record (MASTER_UID)
+- Apply aggregation strategy to numeric columns
+- For text/date: use random selection from grouped values (except MAX/MIN use that directly)
+- Result: ONE row per unique MASTER_UID
+
+Code structure:
 1. Load all dataframes (handle CSV/Excel sheets)
-2. Normalize keys for each df
-3. Create MASTER_UID column
-4. Merge with pd.concat() or pd.merge(how='outer')
-5. Verify: row count >= sum of inputs
-6. Save to '{safe_output_path}'
-7. Print "SUCCESS: Unified data saved to master_unified_data.xlsx"
-
-MULTI-FILE (if different granularity):
-1. Create separate files for each level (master, detail, etc.)
-2. Save each to output folder
-3. Create relationships.txt explaining structure
-4. Print "SUCCESS: Data normalized into multiple files. See relationships.txt"
+2. Normalize keys for each df (convert to string, strip whitespace)
+3. Create MASTER_UID column by concatenating key columns
+4. Identify column data types:
+    - Numeric (int, float) → apply aggregation
+    - Text/String → random selection from grouped data
+    - Date/Datetime → random selection or leave empty
+5. Apply groupby with custom aggregation:
+    - Numeric: {state.get("aggregation_strategy", "AGGREGATE_SUM").replace('AGGREGATE_', '').lower()}
+    - Text: use lambda to random.choice from unique values
+6. Merge all data into single dataframe
+7. VERIFY: result has exactly one row per MASTER_UID
+8. Save to '{safe_output_path}'
+9. Print "SUCCESS: Unified data saved to master_unified_data.xlsx"
 
 OUTPUT: Python code only, no markdown."""
         
@@ -560,7 +584,8 @@ OUTPUT: Python code only, no markdown."""
         code = response.replace("```python", "").replace("```", "").strip()
         
         logger.info("✅ Code generated successfully")
-        logger.info(f"📋 Code length: {len(code)} characters, {code.count('def')} functions")
+        logger.info(f"📋 Code length: {len(code)} characters")
+        logger.info("📋 Single-file output configured")
         
         return {"final_code": code}
 
@@ -603,31 +628,17 @@ OUTPUT: Python code only, no markdown."""
                     "execution_retries": exec_retries + 1
                 }
             elif new_files:
-                # Multiple files case (normalized structure)
+                # Multiple files case - ERROR! We require single file output
                 logger.info(f"✅ Code executed successfully!")
-                logger.info(f"📁 Output files created: {len(new_files)} files")
+                logger.error(f"❌ CONSTRAINT VIOLATION: Created {len(new_files)} files instead of single file")
                 for f in sorted(new_files):
                     file_path = os.path.join(output_folder, f)
                     file_size = os.path.getsize(file_path) / 1024
-                    logger.info(f"   - {f} ({file_size:.2f} KB)")
-                
-                # Create a summary file listing for download
-                summary_path = os.path.join(output_folder, 'OUTPUT_SUMMARY.txt')
-                with open(summary_path, 'w', encoding='utf-8') as sf:
-                    sf.write("DATA UNIFICATION RESULTS\n")
-                    sf.write("=" * 50 + "\n\n")
-                    sf.write(f"Total files generated: {len(new_files)}\n\n")
-                    sf.write("Files:\n")
-                    for f in sorted(new_files):
-                        sf.write(f"  - {f}\n")
-                    sf.write("\n")
-                    if 'relationships.txt' in new_files:
-                        sf.write("⚠️  Data was split into multiple files due to complex relationships.\n")
-                        sf.write("    See 'relationships.txt' for schema details.\n")
+                    logger.error(f"   - {f} ({file_size:.2f} KB)")
                 
                 return {
-                    "execution_result": "SUCCESS",
-                    "execution_error": "",
+                    "execution_result": "FAILED",
+                    "execution_error": f"System created {len(new_files)} files but single file output is required. Regenerating code with stricter constraints.",
                     "execution_retries": exec_retries + 1
                 }
             else:
@@ -974,6 +985,11 @@ OUTPUT (JSON):
         logger.info("")
         logger.info("🚀 " + "="*55)
         logger.info("🚀 MULTI-STAGE REFLEXION AGENT - STARTING")
+        logger.info("📋 MODE: SINGLE FILE OUTPUT (enforced)")
+        logger.info("   - Always creates ONE master file")
+        logger.info("   - Numeric fields aggregated per strategy")
+        logger.info("   - Text fields randomly selected from detail records")
+        logger.info("")
         logger.info("🚀 " + "="*55)
         logger.info("")
         logger.info(f"📂 Files to process: {len(file_paths)}")
@@ -1039,6 +1055,14 @@ OUTPUT (JSON):
         if final_state["execution_result"] == "SUCCESS":
             logger.info("✅ " + "="*55)
             logger.info("✅ UNIFICATION COMPLETED SUCCESSFULLY!")
+            logger.info("")
+            logger.info("📄 OUTPUT: master_unified_data.xlsx")
+            if final_state.get('one_to_many_detected'):
+                agg_strategy = final_state.get('aggregation_strategy', 'N/A')
+                logger.info(f"   - One-to-many data aggregated using: {agg_strategy}")
+                logger.info("   - Numeric fields: aggregated per strategy")
+                logger.info("   - Text fields: randomly selected from detail records")
+            logger.info("   - Output: Single unified file with all data merged")
             logger.info("✅ " + "="*55)
             logger.info("")
             return True, "master_unified_data.xlsx", final_state

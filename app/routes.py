@@ -122,7 +122,7 @@ def process_files():
         
         if success:
             log_info("✅ LangGraph agent processing completed successfully")
-            # Check if single file or multiple files were generated
+            # ALWAYS expect single file output now
             output_files = [f for f in os.listdir(output_dir) if os.path.isfile(os.path.join(output_dir, f))]
             log_info(f"📊 Generated {len(output_files)} output file(s)")
             
@@ -131,22 +131,6 @@ def process_files():
                 log_info("✅ Single unified file generated: master_unified_data.xlsx")
                 flash("✅ Data unified successfully into single file.", "success")
                 return render_template('index.html', download_file='master_unified_data.xlsx', single_file=True)
-            elif len(output_files) > 1:
-                # Multiple files case - create a zip
-                import zipfile
-                zip_path = os.path.join(output_dir, 'unified_data_output.zip')
-                log_info(f"📦 Creating zip archive with {len(output_files)} files")
-                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                    for file in output_files:
-                        file_path = os.path.join(output_dir, file)
-                        zipf.write(file_path, arcname=file)
-                
-                log_info("✅ Zip archive created successfully")
-                flash("✅ Data processed. Multiple files generated (complex relationships detected).", "warning")
-                return render_template('index.html', 
-                                     download_file='unified_data_output.zip', 
-                                     single_file=False,
-                                     file_count=len(output_files))
             else:
                 log_info("✅ Processing complete")
                 flash("✅ Processing complete. Check output folder.", "success")

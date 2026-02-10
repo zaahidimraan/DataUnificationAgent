@@ -138,23 +138,17 @@
             <h3>🎉 Processing Complete</h3>
         </div>
         <div class="card-body text-center">
-            {% if single_file %}
-                <p class="card-text">Your data has been analyzed, matched, and merged into a single master file.</p>
-                <a href="{{ url_for('main.download_file', filename=download_file) }}" class="btn btn-success btn-lg">
-                    📥 Download Master File
-                </a>
-            {% else %}
-                <p class="card-text">
-                    <strong>Complex Data Structure Detected</strong><br>
-                    Your data contains different granularities (e.g., master records + transaction history) and cannot be safely merged into a single flat file without data loss.<br><br>
-                    The system has created <strong>{{ file_count }} normalized files</strong> preserving all relationships.
-                </p>
-                <a href="{{ url_for('main.download_file', filename=download_file) }}" class="btn btn-warning btn-lg">
-                    📦 Download All Files (ZIP)
-                </a>
-                <br><br>
-                <small class="text-muted">The ZIP contains multiple related tables with a relationships.txt guide</small>
-            {% endif %}
+            <p class="card-text">Your data has been analyzed, matched, and aggregated into a unified master file.</p>
+            <p class="text-muted small">Even complex one-to-many data is intelligently merged with smart aggregation:</p>
+            <ul class="text-muted small" style="text-align: left; display: inline-block;">
+                <li><strong>Numeric fields:</strong> Aggregated (sum/avg/min/max/count)</li>
+                <li><strong>Text fields:</strong> Randomly selected from detail records</li>
+                <li><strong>Result:</strong> ONE row per master record</li>
+            </ul>
+            <br><br>
+            <a href="{{ url_for('main.download_file', filename=download_file) }}" class="btn btn-success btn-lg">
+                📥 Download Unified File
+            </a>
             <br><br>
             <a href="/" class="text-muted text-decoration-none">Start Over</a>
         </div>
