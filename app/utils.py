@@ -62,3 +62,29 @@ def setup_logger(name="data_agent"):
 
 # Initialize the global logger
 logger = setup_logger()
+
+def log_info(message):
+    """Log an info message to both file and console."""
+    logger.info(message)
+
+def log_error(message):
+    """Log an error message to both file and console."""
+    logger.error(message)
+
+def log_warning(message):
+    """Log a warning message to both file and console."""
+    logger.warning(message)
+
+def log_debug(message):
+    """Log a debug message to both file and console."""
+    logger.debug(message)
+
+def setup_flask_logging(app):
+    """
+    Configure Flask app logging to use the same logger that writes to file and console.
+    This ensures Flask's built-in logs also go to the log file.
+    """
+    flask_logger = setup_logger("flask_app")
+    app.logger.handlers = flask_logger.handlers
+    app.logger.setLevel(logging.INFO)
+    return app.logger

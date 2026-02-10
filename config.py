@@ -3,7 +3,8 @@ import os
 class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-key-12345'
     
-    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # Fixed: Only go up one level (dirname once) since config.py is in project root
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     
     UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
     OUTPUT_FOLDER = os.path.join(BASE_DIR, 'outputs')
