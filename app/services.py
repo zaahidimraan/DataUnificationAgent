@@ -32,6 +32,14 @@ class AgentState(TypedDict):
     aggregation_strategy: str  # LLM's recommended strategy
     user_intent: str  # What user wants to achieve
     
+    # Target Schema Mode State (NEW)
+    target_mode_enabled: bool  # Is target mode active?
+    target_schema_input: str  # Raw user input (columns from file or text description)
+    target_schema_type: str  # 'file' or 'text'
+    target_validation_retries: int  # How many times we've retried mapping
+    target_validation_feedback: str  # Feedback from last validation
+    target_fallback_triggered: bool  # Have we fallen back to auto mode?
+    
     # Phase 2: Schema State
     schema: str
     schema_feedback: str
@@ -52,6 +60,53 @@ class UnificationGraphAgent:
             temperature=0
         )
         self.graph = self._build_graph()
+    
+    def _parse_target_schema(self, target_input, input_type):
+        """Parse target schema from user input (file or text).
+        
+        Args:
+            target_input: Either file path (for file type) or text description
+            input_type: 'file' or 'text'
+            
+        Returns:
+            String containing parsed column names and any metadata
+        """
+        logger.info(f"📋 Parsing target schema (type: {input_type})")
+        
+        if input_type == 'file':
+            try:
+                # Load file and extract column headers
+                if target_input.endswith('.csv'):
+                    df = pd.read_csv(target_input, nrows=0)  # Just read headers
+                    columns = list(df.columns)
+                elif target_input.endswith(('.xlsx', '.xls')):
+                    df = pd.read_excel(target_input, nrows=0)  # Just read headers
+                    columns = list(df.columns)
+                else:
+                    logger.error(f"❌ Unsupported target file format: {target_input}")
+                    return None
+                
+                logger.info(f"✅ Extracted {len(columns)} columns from target file")
+                logger.info(f"   Columns: {columns}")
+                
+                # Format as structured text for LLM
+                result = f"TARGET COLUMNS ({len(columns)} total):\n"
+                result += "\n".join([f"  - {col}" for col in columns])
+                return result
+                
+            except Exception as e:
+                logger.error(f"❌ Error parsing target file: {e}")
+                return None
+        
+        elif input_type == 'text':
+            # Text description - clean and format it
+            logger.info(f"✅ Using text description as target schema")
+            result = f"TARGET DESCRIPTION:\n{target_input}"
+            return result
+        
+        else:
+            logger.error(f"❌ Unknown target input type: {input_type}")
+            return None
 
     def _load_samples(self, file_paths):
         """Helper to load lightweight samples for the LLM."""
@@ -369,8 +424,203 @@ OUTPUT (JSON only):
         }
 
     # ============================================================
-    # PHASE 2: SCHEMA LOOP
+    # PHASE 2: SCHEMA LOOP (Auto Mode & Target Mode)
     # ============================================================
+    
+    def node_target_schema_mapper(self, state: AgentState):
+        """Maps source data to user-defined target schema.
+        
+        This node is used when target_mode_enabled=True. It attempts to create
+        a schema that matches the user's specified target columns/structure.
+        """
+        retry_count = state.get("target_validation_retries", 0)
+        previous_feedback = state.get("target_validation_feedback", "")
+        
+        logger.info("="*60)
+        logger.info("🎯 PHASE 2: TARGET-DRIVEN SCHEMA MAPPING")
+        logger.info(f"Attempt #{retry_count + 1} / 3")
+        if previous_feedback:
+            logger.info(f"📝 Addressing feedback from previous attempt")
+        logger.info("="*60)
+        
+        feedback_context = ""
+        if previous_feedback:
+            feedback_context = f"""
+PREVIOUS VALIDATION FEEDBACK:
+{previous_feedback}
+
+CRITICAL: Address ALL issues mentioned above. Use the feedback to improve your mapping.
+"""
+        
+        # Prepare aggregation context if one-to-many detected
+        aggregation_context = ""
+        if state.get("one_to_many_detected"):
+            aggregation_context = f"""
+ONE-TO-MANY RELATIONSHIP DETECTED:
+- Aggregation strategy: {state.get('aggregation_strategy', 'AGGREGATE_SUM')}
+- Apply this strategy when mapping numeric fields to target columns
+- For text fields: use random selection from grouped values
+"""
+        
+        prompt = f"""You are designing a unified data schema to match the USER'S TARGET SPECIFICATION.
+
+TARGET SPECIFICATION (what user wants):
+{state['target_schema_input']}
+
+SOURCE DATA IDENTIFIERS:
+{state['identifiers']}
+
+SOURCE DATA SAMPLES:
+{state['dfs_sample_str']}
+{aggregation_context}
+{feedback_context}
+
+YOUR TASK:
+Map source data columns to the target schema specified by the user. You MUST:
+
+1. **Match target column names exactly** - Use the exact column names from the target specification
+2. **Map all source data** - Ensure no source columns are lost if they're relevant
+3. **Handle missing target columns** - If target asks for columns that don't exist in source:
+   - Try to derive them (e.g., "total_sales" = sum of sale amounts)
+   - If impossible to derive, mark as "UNMAPPABLE - <reason>"
+4. **Respect aggregation strategy** - If one-to-many detected, apply the aggregation strategy
+5. **Maintain data integrity** - Ensure keys/identifiers are properly mapped
+
+OUTPUT FORMAT (use this exact structure):
+# GRANULARITY
+<Describe the data granularity: one row per what entity?>
+
+# TARGET MODE
+ENABLED - Mapping to user-defined target schema
+
+# MAPPING STRATEGY
+<How you'll map source → target, handling any gaps or transformations>
+
+# TARGET COLUMNS
+For each target column the user requested, provide:
+- Column Name: <exact name from target>
+- Source Mapping: <which source column(s) map to this>
+- Transformation: <any calculation/aggregation needed>
+- Status: MAPPED or UNMAPPABLE
+
+# KEYS
+<Which columns serve as identifiers + Master_UID formula>
+
+# ADDITIONAL COLUMNS
+<Any source columns not in target but should be preserved>
+
+CRITICAL: If you cannot map certain target columns, be explicit about why and mark them as UNMAPPABLE.
+"""
+        
+        logger.info("🤖 Calling LLM to map source data to target schema...")
+        response = self.llm.invoke(prompt).content
+        logger.info("✅ Target schema mapping proposal generated")
+        logger.info(f"📋 Mapping length: {len(response)} characters")
+        
+        return {
+            "schema": response,
+            "target_validation_retries": retry_count + 1
+        }
+    
+    def node_target_schema_validator(self, state: AgentState):
+        """Validates the target schema mapping with strict checks.
+        
+        This validates whether the mapping successfully meets the target requirements.
+        If validation fails 3 times, it triggers fallback to auto mode.
+        """
+        logger.info("⚖️  Validating target schema mapping...")
+        
+        prompt = f"""You are a Senior Data Quality Engineer. Validate this target schema mapping (0-100 score).
+
+USER'S TARGET SPECIFICATION:
+{state['target_schema_input']}
+
+PROPOSED MAPPING:
+{state['schema']}
+
+SOURCE DATA:
+{state['dfs_sample_str']}
+
+VALIDATION CRITERIA (100 points total):
+1. **Target Column Coverage (40 pts)**: Are ALL requested target columns included?
+   - Full credit: All target columns mapped
+   - Partial: Some mapped, others marked UNMAPPABLE with valid reason
+   - Zero: Missing target columns without explanation
+
+2. **Mapping Correctness (30 pts)**: Are mappings logically correct?
+   - Do source columns match target semantics?
+   - Are data types compatible?
+   - Are transformations appropriate?
+
+3. **Data Preservation (15 pts)**: Is source data properly handled?
+   - No important source data lost
+   - Aggregations applied correctly if needed
+
+4. **Implementation Clarity (15 pts)**: Can this be implemented?
+   - Clear instructions for code generation
+   - Unambiguous mapping logic
+   - Proper key/identifier handling
+
+SCORING:
+- 90-100: Excellent mapping, approve
+- 70-89: Good but needs improvement, provide specific feedback
+- 0-69: Poor mapping, major issues
+
+If score < 90, provide SPECIFIC, ACTIONABLE feedback:
+- Which target columns are missing or incorrectly mapped?
+- What transformations are wrong or missing?
+- How should the mapper improve the next attempt?
+
+OUTPUT (JSON only):
+{{
+  "confidence_score": <0-100>,
+  "target_columns_mapped": <number of target columns successfully mapped>,
+  "target_columns_total": <total target columns user requested>,
+  "unmappable_columns": ["<list of columns that can't be mapped>"],
+  "feedback_text": "<Specific issues if score < 90, else 'Approved'>"
+}}
+"""
+        
+        response = self.llm.invoke(prompt).content
+        
+        # Parse JSON response
+        try:
+            json_str = response.strip()
+            if "```json" in json_str:
+                json_str = json_str.split("```json")[1].split("```")[0].strip()
+            elif "```" in json_str:
+                json_str = json_str.split("```")[1].split("```")[0].strip()
+            
+            eval_result = json.loads(json_str)
+            confidence = float(eval_result.get("confidence_score", 0))
+            feedback = eval_result.get("feedback_text", "")
+            mapped_count = eval_result.get("target_columns_mapped", 0)
+            total_count = eval_result.get("target_columns_total", 0)
+            unmappable = eval_result.get("unmappable_columns", [])
+            
+            logger.info(f"📊 Target Validation Score: {confidence}/100")
+            logger.info(f"📊 Target Columns: {mapped_count}/{total_count} mapped")
+            
+            if unmappable:
+                logger.warning(f"⚠️  Unmappable columns: {', '.join(unmappable)}")
+            
+            if confidence >= 90:
+                logger.info("✅ Target mapping approved! Moving to code generation.")
+            else:
+                retries = state.get("target_validation_retries", 0)
+                logger.warning(f"⚠️  Target mapping needs improvement (Score: {confidence})")
+                logger.warning(f"💬 Feedback: {feedback[:200]}...") if len(feedback) > 200 else logger.warning(f"💬 Feedback: {feedback}")
+                logger.warning(f"🔄 Retry count: {retries}/3")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to parse target validator response: {e}")
+            confidence = 0.0
+            feedback = f"Validator response parsing failed: {response}"
+        
+        return {
+            "schema_confidence": confidence,
+            "target_validation_feedback": feedback
+        }
 
     def node_schema_maker(self, state: AgentState):
         """Defines the target unified table structure."""
@@ -778,6 +1028,34 @@ OUTPUT (JSON):
                 "one_to_many_resolution": "awaiting_user_choice",
                 "aggregation_strategy": ""
             }
+    
+    def node_target_fallback(self, state: AgentState):
+        """Handles fallback from target mode to auto mode after 3 failed attempts.
+        
+        This node is reached when target validation has failed 3 times.
+        It logs the failure and switches to auto schema generation mode.
+        """
+        logger.warning("")
+        logger.warning("⚠️  " + "="*55)
+        logger.warning("⚠️  TARGET MODE FALLBACK TRIGGERED")
+        logger.warning("⚠️  " + "="*55)
+        logger.warning("")
+        logger.warning("📊 Unable to map source data to target schema after 3 attempts")
+        logger.warning("")
+        logger.warning("🔄 FALLING BACK TO AUTO MODE:")
+        logger.warning("   - Disabling target mode")
+        logger.warning("   - Using automatic schema generation")
+        logger.warning("   - This ensures your data is still unified successfully")
+        logger.warning("")
+        logger.warning("💡 Recommendation: Review your target schema and source data compatibility")
+        logger.warning("")
+        
+        return {
+            "target_mode_enabled": False,
+            "target_fallback_triggered": True,
+            "schema_feedback": "Target mode failed. Starting fresh with auto schema generation.",
+            "schema_retries": 0  # Reset for auto mode
+        }
 
     # ============================================================
     # GRAPH BUILDER
@@ -792,8 +1070,14 @@ OUTPUT (JSON):
         workflow.add_node("identifier", self.node_identifier)
         workflow.add_node("id_evaluator", self.node_id_evaluator)
         workflow.add_node("one_to_many_resolver", self.node_one_to_many_resolver)  # Smart resolution
-        workflow.add_node("schema_maker", self.node_schema_maker)
-        workflow.add_node("schema_evaluator", self.node_schema_evaluator)
+        
+        # Phase 2: Schema nodes (both auto and target mode)
+        workflow.add_node("target_schema_mapper", self.node_target_schema_mapper)  # Target mode
+        workflow.add_node("target_schema_validator", self.node_target_schema_validator)  # Target validation
+        workflow.add_node("target_fallback", self.node_target_fallback)  # Fallback to auto
+        workflow.add_node("schema_maker", self.node_schema_maker)  # Auto mode
+        workflow.add_node("schema_evaluator", self.node_schema_evaluator)  # Auto validation
+        
         workflow.add_node("code_generator", self.node_code_generator)
         workflow.add_node("executor", self.node_executor)
         
@@ -842,7 +1126,14 @@ OUTPUT (JSON):
                 logger.info("🎯 PHASE 1 COMPLETE: Proceeding to Schema Design")
                 logger.info(f"   Final confidence: {confidence}/100, Total attempts: {retries}")
                 logger.info("")
-                return "schema_maker"
+                
+                # Check if target mode is enabled
+                if state.get("target_mode_enabled", False):
+                    logger.info("🎯 TARGET MODE ENABLED - Using target-driven schema mapping")
+                    return "target_schema_mapper"
+                else:
+                    logger.info("🤖 AUTO MODE - Using automatic schema generation")
+                    return "schema_maker"
             else:
                 logger.info("")
                 logger.info(f"🔄 PHASE 1 RETRY: Attempt {retries} - Score {confidence}/100 (Need 90+)")
@@ -854,6 +1145,7 @@ OUTPUT (JSON):
             route_after_id_eval,
             {
                 "schema_maker": "schema_maker",
+                "target_schema_mapper": "target_schema_mapper",
                 "identifier": "identifier",
                 "one_to_many_resolver": "one_to_many_resolver"  # NEW route
             }
@@ -861,7 +1153,7 @@ OUTPUT (JSON):
         
         # Phase 1.5: One-to-Many Resolution
         def route_after_one_to_many_resolution(state):
-            """Route based on one-to-many resolution strategy."""
+            """Route based on one-to-many resolution strategy and target mode."""
             resolution = state.get("one_to_many_resolution", "")
             
             if resolution == "awaiting_user_choice":
@@ -872,19 +1164,68 @@ OUTPUT (JSON):
             else:
                 # User selection received or auto-solve completed
                 logger.info("✅ Aggregation strategy confirmed - proceeding to schema design")
-                return "schema_maker"
+                
+                # Check if target mode is enabled
+                if state.get("target_mode_enabled", False):
+                    logger.info("🎯 TARGET MODE ENABLED - Using target-driven schema mapping")
+                    return "target_schema_mapper"
+                else:
+                    logger.info("🤖 AUTO MODE - Using automatic schema generation")
+                    return "schema_maker"
         
         workflow.add_conditional_edges(
             "one_to_many_resolver",
             route_after_one_to_many_resolution,
             {
                 "schema_maker": "schema_maker",
+                "target_schema_mapper": "target_schema_mapper",
                 END: END
             }
         )
         
-        # Phase 2: Schema Loop
+        # Phase 2: Schema Loop (Auto Mode)
         workflow.add_edge("schema_maker", "schema_evaluator")
+        
+        # Phase 2: Target Schema Mapping Loop
+        workflow.add_edge("target_schema_mapper", "target_schema_validator")
+        
+        def route_after_target_validation(state):
+            """Route based on target validation confidence and retries."""
+            confidence = state.get("schema_confidence", 0)
+            retries = state.get("target_validation_retries", 0)
+            
+            if confidence >= 90:
+                logger.info("")
+                logger.info("🎯 TARGET MAPPING APPROVED: Proceeding to Code Generation")
+                logger.info(f"   Final confidence: {confidence}/100, Total attempts: {retries}")
+                logger.info("")
+                return "code_generator"
+            elif retries >= 3:
+                # Exceeded max retries - trigger fallback to auto mode
+                logger.warning("")
+                logger.warning("⚠️  TARGET MAPPING FAILED: Max retries (3) reached")
+                logger.warning(f"   Final confidence: {confidence}/100")
+                logger.warning("   Triggering fallback to auto mode...")
+                logger.warning("")
+                return "target_fallback"
+            else:
+                logger.info("")
+                logger.info(f"🔄 TARGET MAPPING RETRY: Attempt {retries} - Score {confidence}/100 (Need 90+)")
+                logger.info("")
+                return "target_schema_mapper"
+        
+        workflow.add_conditional_edges(
+            "target_schema_validator",
+            route_after_target_validation,
+            {
+                "code_generator": "code_generator",
+                "target_schema_mapper": "target_schema_mapper",
+                "target_fallback": "target_fallback"
+            }
+        )
+        
+        # Fallback to auto mode after target failure
+        workflow.add_edge("target_fallback", "schema_maker")
         
         def route_after_schema_eval(state):
             """Route based on schema confidence and retries."""
@@ -971,13 +1312,15 @@ OUTPUT (JSON):
     # MAIN ENTRY POINT
     # ============================================================
     
-    def run(self, file_paths, output_folder, one_to_many_choice=""):
+    def run(self, file_paths, output_folder, one_to_many_choice="", target_schema_file=None, target_schema_text=None):
         """Main entry point for the agent.
         
         Args:
             file_paths: List of file paths to unify
             output_folder: Output directory for results
             one_to_many_choice: User's choice for one-to-many resolution ('auto_solve', 'aggregate_max', etc.)
+            target_schema_file: Path to template file with target column headers (optional)
+            target_schema_text: Text description of target schema (optional)
         
         Returns:
             Tuple of (success: bool, message: str, final_state: dict)
@@ -985,7 +1328,31 @@ OUTPUT (JSON):
         logger.info("")
         logger.info("🚀 " + "="*55)
         logger.info("🚀 MULTI-STAGE REFLEXION AGENT - STARTING")
-        logger.info("📋 MODE: SINGLE FILE OUTPUT (enforced)")
+        
+        # Determine if target mode is enabled
+        target_mode_enabled = bool(target_schema_file or target_schema_text)
+        target_schema_input = None
+        target_schema_type = None
+        
+        if target_mode_enabled:
+            logger.info("📋 MODE: TARGET-DRIVEN SCHEMA")
+            if target_schema_file:
+                logger.info(f"   Input: Template file ({os.path.basename(target_schema_file)})")
+                target_schema_type = "file"
+                # Parse the target schema
+                target_schema_input = self._parse_target_schema(target_schema_file, "file")
+                if not target_schema_input:
+                    logger.error("❌ Failed to parse target schema file")
+                    return False, "Invalid target schema file", {}
+            elif target_schema_text:
+                logger.info(f"   Input: Text description")
+                target_schema_type = "text"
+                target_schema_input = self._parse_target_schema(target_schema_text, "text")
+            
+            logger.info("   Fallback: Auto mode (if target mapping fails after 3 attempts)")
+        else:
+            logger.info("📋 MODE: AUTOMATIC SCHEMA GENERATION")
+        
         logger.info("   - Always creates ONE master file")
         logger.info("   - Numeric fields aggregated per strategy")
         logger.info("   - Text fields randomly selected from detail records")
@@ -1019,11 +1386,19 @@ OUTPUT (JSON):
             "id_retries": 0,
             "has_one_to_many": False,
             
-            # Phase 1.5: One-to-Many Resolution State (NEW)
+            # Phase 1.5: One-to-Many Resolution State
             "one_to_many_detected": False,
             "one_to_many_resolution": one_to_many_choice or "",  # Pre-set if user provided choice
             "aggregation_strategy": "",
             "user_intent": one_to_many_choice or "",
+            
+            # Target Schema Mode State (NEW)
+            "target_mode_enabled": target_mode_enabled,
+            "target_schema_input": target_schema_input or "",
+            "target_schema_type": target_schema_type or "",
+            "target_validation_retries": 0,
+            "target_validation_feedback": "",
+            "target_fallback_triggered": False,
             
             # Phase 2 state
             "schema": "",
@@ -1046,7 +1421,15 @@ OUTPUT (JSON):
         logger.info("")
         logger.info("📊 FINAL STATISTICS:")
         logger.info(f"   Phase 1 (Identification) attempts: {final_state.get('id_retries', 0)}")
-        logger.info(f"   Phase 2 (Schema) attempts: {final_state.get('schema_retries', 0)}")
+        
+        if final_state.get('target_mode_enabled') and not final_state.get('target_fallback_triggered'):
+            logger.info(f"   Phase 2 (Target Mapping) attempts: {final_state.get('target_validation_retries', 0)}")
+        elif final_state.get('target_fallback_triggered'):
+            logger.info(f"   Phase 2 (Target Mapping) attempts: {final_state.get('target_validation_retries', 0)} - FAILED")
+            logger.info(f"   Phase 2 (Auto Schema) attempts: {final_state.get('schema_retries', 0)} - FALLBACK")
+        else:
+            logger.info(f"   Phase 2 (Schema) attempts: {final_state.get('schema_retries', 0)}")
+        
         logger.info(f"   Phase 3 (Execution) attempts: {final_state.get('execution_retries', 0)}")
         if final_state.get('one_to_many_detected'):
             logger.info(f"   One-to-many detected: {final_state.get('one_to_many_resolution', 'N/A')}")
@@ -1057,6 +1440,14 @@ OUTPUT (JSON):
             logger.info("✅ UNIFICATION COMPLETED SUCCESSFULLY!")
             logger.info("")
             logger.info("📄 OUTPUT: master_unified_data.xlsx")
+            
+            if final_state.get('target_mode_enabled'):
+                if final_state.get('target_fallback_triggered'):
+                    logger.warning("   ⚠️  Target mode fallback: Used auto-generated schema")
+                    logger.warning("       (Target mapping failed after 3 attempts)")
+                else:
+                    logger.info("   ✅ Target mode: Output matches user-defined schema")
+            
             if final_state.get('one_to_many_detected'):
                 agg_strategy = final_state.get('aggregation_strategy', 'N/A')
                 logger.info(f"   - One-to-many data aggregated using: {agg_strategy}")
@@ -1065,7 +1456,13 @@ OUTPUT (JSON):
             logger.info("   - Output: Single unified file with all data merged")
             logger.info("✅ " + "="*55)
             logger.info("")
-            return True, "master_unified_data.xlsx", final_state
+            
+            # Prepare success message
+            success_msg = "master_unified_data.xlsx"
+            if final_state.get('target_fallback_triggered'):
+                success_msg += " (auto-generated schema - target mapping failed)"
+            
+            return True, success_msg, final_state
         else:
             error_msg = final_state.get("execution_error", "Unknown error")
             logger.error("❌ " + "="*55)

@@ -10,6 +10,11 @@
         .option-card { border: 1px solid #dee2e6; padding: 20px; margin: 10px 0; border-radius: 8px; cursor: pointer; transition: all 0.3s; }
         .option-card:hover { background: #f8f9fa; border-color: #0d6efd; box-shadow: 0 2px 8px rgba(13, 110, 253, 0.15); }
         .option-card input[type="radio"]:checked ~ .option-content { color: #0d6efd; font-weight: bold; }
+        .target-schema-section { background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; border: 1px solid #dee2e6; }
+        .collapsible-header { cursor: pointer; user-select: none; padding: 10px; background: #e9ecef; border-radius: 5px; margin-bottom: 15px; }
+        .collapsible-header:hover { background: #dee2e6; }
+        .collapsible-content { display: none; }
+        .collapsible-content.active { display: block; }
     </style>
 </head>
 <body class="bg-light">
@@ -26,6 +31,49 @@
                 <div class="upload-box text-center">
                     <p class="mb-3">Select all your source files (Excel/CSV)</p>
                     <input type="file" class="form-control mb-3" name="files" multiple required id="fileInput">
+                </div>
+                
+                <!-- Target Schema Section (Advanced Options) -->
+                <div class="target-schema-section mt-4">
+                    <div class="collapsible-header" onclick="toggleTargetSchema()">
+                        <strong>🎯 Advanced: Define Target Schema (Optional)</strong>
+                        <span class="float-end" id="toggleIcon">▼</span>
+                    </div>
+                    <div class="collapsible-content" id="targetSchemaContent">
+                        <p class="text-muted small mb-3">
+                            By default, the system automatically designs the output schema. 
+                            Use this option to specify YOUR desired output format.
+                        </p>
+                        
+                        <div class="mb-3">
+                            <label class="form-label"><strong>Option 1: Upload Template File</strong></label>
+                            <p class="text-muted small">Upload a file (CSV/Excel) with column headers that define your desired output structure.</p>
+                            <input type="file" class="form-control" name="target_schema_file" accept=".csv,.xlsx,.xls">
+                        </div>
+                        
+                        <div class="text-center my-3">
+                            <span class="badge bg-secondary">OR</span>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label class="form-label"><strong>Option 2: Describe Target Schema</strong></label>
+                            <p class="text-muted small">Describe the columns you need (e.g., "I want: customer_id, total_sales, average_order_value")</p>
+                            <textarea class="form-control" name="target_schema_text" rows="3" 
+                                      placeholder="Example: I need columns: customer_id, customer_name, total_revenue, order_count, average_order_value"></textarea>
+                        </div>
+                        
+                        <div class="alert alert-info small mb-0">
+                            <strong>ℹ️ How it works:</strong>
+                            <ul class="mb-0 mt-2">
+                                <li>System attempts to map your source data to the target schema</li>
+                                <li>If mapping fails after 3 attempts, automatically falls back to auto-generated schema</li>
+                                <li>You'll be notified which mode was used in the results</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="text-center mt-3">
                     <button class="btn btn-primary btn-lg w-100" type="submit">
                         ✨ Unify Files Now
                     </button>
@@ -138,6 +186,20 @@
             <h3>🎉 Processing Complete</h3>
         </div>
         <div class="card-body text-center">
+            {% if target_mode_used %}
+                {% if target_fallback %}
+                <div class="alert alert-warning">
+                    <strong>⚠️ Target Schema Fallback</strong><br>
+                    Unable to map to your target schema after 3 attempts. Used auto-generated schema instead.
+                </div>
+                {% else %}
+                <div class="alert alert-success">
+                    <strong>✅ Target Schema Applied</strong><br>
+                    Your data has been unified according to your specified target schema!
+                </div>
+                {% endif %}
+            {% endif %}
+            
             <p class="card-text">Your data has been analyzed, matched, and aggregated into a unified master file.</p>
             <p class="text-muted small">Even complex one-to-many data is intelligently merged with smart aggregation:</p>
             <ul class="text-muted small" style="text-align: left; display: inline-block;">
@@ -158,6 +220,20 @@
 </div>
 
 <script>
+// Toggle target schema section
+function toggleTargetSchema() {
+    const content = document.getElementById('targetSchemaContent');
+    const icon = document.getElementById('toggleIcon');
+    
+    if (content.classList.contains('active')) {
+        content.classList.remove('active');
+        icon.textContent = '▼';
+    } else {
+        content.classList.add('active');
+        icon.textContent = '▲';
+    }
+}
+
 // Restore form data if needed
 window.addEventListener('DOMContentLoaded', function() {
     const form = document.getElementById('oneToManyForm');
