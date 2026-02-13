@@ -390,16 +390,32 @@ class UnificationGraphAgent:
         if previous_feedback:
             feedback_context = f"\nPREVIOUS FEEDBACK: {previous_feedback}\nFix these issues."
         
-        prompt = f"""Analyze data and identify linking keys.
+        prompt = f"""Analyze data and identify linking keys for unification.
 
 DATA:
 {state['dfs_sample_str']}
 
-TASK:
-1. For EACH file/sheet, classify as MASTER (one per entity) or DETAIL (many per entity, like transaction history)
-2. Find entity with most ID columns - this defines composite key structure
-3. Map other entities to this structure (use '0' for missing keys)
-4. Add prefix if IDs might conflict (e.g., 'F-' for Flats)
+TASK - Identify how to link ALL files together:
+1. Classify EACH file/sheet as:
+   - MASTER: One record per entity (e.g., Property Master, Customer Master)
+   - DETAIL: Multiple records per entity (e.g., Transactions, History, Logs)
+
+2. Identify ALL possible ID/key columns in each file:
+   - Look for: ID, Code, Number, Reference, Key columns
+   - These will form the COMPOSITE KEY for unification
+
+3. CRITICAL - Design cross-file key mapping:
+   - Keys from DIFFERENT files can combine to form MASTER_UID
+   - Example: File1 has 'PropertyID', File2 has 'BuildingID' + 'UnitID'
+   - MASTER_UID = PropertyID (from File1) OR BuildingID + UnitID (from File2)
+   - Show EXACT column names and which file they come from
+
+4. Handle key name variations:
+   - Same entity might have different column names (PropertyID vs Property_Code)
+   - Map these equivalent keys explicitly
+
+5. Add prefixes ONLY if IDs might collide:
+   - Example: If FlatID and PropertyID both use numbers 1-100
 
 {feedback_context}
 
@@ -407,9 +423,16 @@ OUTPUT (for EACH file/sheet):
 FILE: <name>
 SHEET: <sheet>
 TYPE: <MASTER or DETAIL>
-KEYS: <how columns map to composite key>
+KEY_COLUMNS: <list exact column names that contain IDs>
+KEY_MAPPING: <how these columns map to create unified key>
+EQUIVALENT_KEYS: <columns from other files that represent same entity>
 PREFIX: <prefix or None>
+NOTES: <any special handling needed>
 ---
+
+COMPOSITE KEY STRUCTURE:
+<Define MASTER_UID formula showing which columns from which files combine>
+Example: MASTER_UID = File1.PropertyID OR (File2.BuildingID + '_' + File2.UnitID)
 
 SUMMARY: List MASTER files and DETAIL files separately.
 """
@@ -449,18 +472,34 @@ DATA:
 {state['dfs_sample_str']}
 
 SCORING (100 points):
-1. All files mapped? (25 pts)
-2. Consistent key structure? (20 pts)
-3. No ID collisions? (20 pts)
-4. Clear implementation? (15 pts)
-5. Proper MASTER/DETAIL classification? (20 pts)
+1. All files mapped? (20 pts)
+   - Every file/sheet has key column identification
 
-CRITICAL: If proposal doesn't classify MASTER vs DETAIL data, score < 70.
+2. Cross-file key mapping clear? (25 pts)
+   - Shows which columns from different files represent same entity
+   - Handles equivalent keys (PropertyID = BuildingID_UnitID)
+   - MASTER_UID formula works across all files
+
+3. Key structure consistency? (20 pts)
+   - Keys can be uniquely combined
+   - No ambiguity in composite key creation
+
+4. No ID collisions? (15 pts)
+   - Prefixes added where needed
+   - Different entities won't have same ID
+
+5. Proper MASTER/DETAIL classification? (20 pts)
+   - Clear distinction between master and detail data
+
+CRITICAL CHECKS:
+- If proposal doesn't show cross-file key mapping: score < 70
+- If MASTER_UID formula is unclear or same for all files: score < 70  
+- If proposal doesn't classify MASTER vs DETAIL: score < 70
 
 OUTPUT (JSON only):
 {{
   "confidence_score": <0-100>,
-  "feedback_text": "<Issues if < 90. Request MASTER/DETAIL classification if missing>"
+  "feedback_text": "<Specific issues if < 90. Must include: which files lack key mapping, unclear MASTER_UID logic, missing classifications>"
 }}
 """
         
@@ -726,7 +765,10 @@ CRITICAL: ALWAYS CREATE SINGLE FILE OUTPUT. Even if data has MASTER+DETAIL:
 
 REQUIREMENTS:
 1. Analyze granularity: All same level or mixed?  
-2. Define key columns and Master UID formula
+2. Define key columns and Master UID formula - BE EXPLICIT:
+   - Show which column from which file
+   - If keys are equivalent across files, map them clearly
+   - Formula must work even if some files don't have all keys
 3. List all value columns to keep (will be aggregated smartly)
 4. ALWAYS state SINGLE FILE (even if granularity is mixed with master+detail)
 
@@ -739,11 +781,24 @@ OUTPUT:
 # STRATEGY
 <Always: Single file with smart aggregation per data type>
 
-# KEYS
-<Key columns + Master_UID formula>
+# KEYS AND MASTER_UID CREATION
+Key columns from each file:
+- File1: <column_name_1, column_name_2>
+- File2: <column_name_3>
+
+MASTER_UID Formula (step-by-step):
+1. For File1: Combine <column_name_1> + '_' + <column_name_2>
+2. For File2: Use <column_name_3> directly (it's equivalent to File1's combined key)
+3. Fill missing with '0' or handle NULL values
+4. Final formula: MASTER_UID = combined_key_1 OR combined_key_2 (coalesce/fallback logic)
+
+Example: If File1 has PropertyID and File2 has BuildingID+UnitID:
+- File1: MASTER_UID = str(PropertyID)
+- File2: MASTER_UID = str(BuildingID) + '_' + str(UnitID)
+- These should identify the SAME entities
 
 # COLUMNS
-<Value columns to retain>
+<Value columns to retain with their source files>
 """
         
         logger.info("🤖 Calling LLM to design schema...")
@@ -768,20 +823,41 @@ SCHEMA:
 DATA:
 {state['dfs_sample_str']}
 
-CHECK:
-1. Keys handle all unique combinations?
-2. All value columns included?
-3. Strategy matches granularity (single vs multi-file)?
-4. If one-to-many, is it preserved (not collapsed)?
+CHECK (100 points):
+1. MASTER_UID formula is explicit and implementable? (30 pts)
+   - Shows which columns from which files
+   - Handles cases where files have different key structures
+   - Clear step-by-step formula for each file
+
+2. Keys handle all unique combinations? (20 pts)
+   - No duplicate MASTER_UIDs possible
+   - Covers all entities from all files
+
+3. All value columns included? (20 pts)
+   - No data loss
+   - Columns properly attributed to source files
+
+4. Strategy matches granularity? (15 pts)
+   - Single file output stated
+   - Aggregation strategy clear
+
+5. Implementation clarity? (15 pts)
+   - A programmer can write code from this schema
+   - No ambiguous instructions
+
+CRITICAL FAILURES (auto-score < 70):
+- MASTER_UID formula uses same logic for all files (when keys differ)
+- No step-by-step key creation per file
+- Unclear how to merge files with different key structures
 
 SCORE: 0-100
 - 90+: Approve
-- <90: Reject with specific issues
+- <90: Reject with specific issues and what to fix
 
 OUTPUT (JSON):
 {{
   "confidence_score": <number>,
-  "feedback_text": "<Issues if rejected, else 'Approved'>"
+  "feedback_text": "<Specific issues if rejected: which files lack clear MASTER_UID logic, what's ambiguous, how to fix. Else 'Approved'>"
 }}
 """
         
@@ -882,23 +958,100 @@ For one-to-many data:
 - For text/date: use random selection from grouped values (except MAX/MIN use that directly)
 - Result: ONE row per unique MASTER_UID
 
-Code structure:
-1. Load all dataframes (handle CSV/Excel sheets)
-2. Normalize keys for each df (convert to string, strip whitespace)
-3. Create MASTER_UID column by concatenating key columns
-4. Identify column data types:
-    - Numeric (int, float) → apply aggregation
-    - Text/String → random selection from grouped data
-    - Date/Datetime → random selection or leave empty
-5. Apply groupby with custom aggregation:
-    - Numeric: {state.get("aggregation_strategy", "AGGREGATE_SUM").replace('AGGREGATE_', '').lower()}
-    - Text: use lambda to random.choice from unique values
-6. Merge all data into single dataframe
-7. VERIFY: result has exactly one row per MASTER_UID
-8. Save to '{safe_output_path}'
-9. Print "SUCCESS: Unified data saved to master_unified_data.xlsx"
+Code structure (FOLLOW EXACTLY):
 
-OUTPUT: Python code only, no markdown."""
+1. **Load all dataframes** (handle CSV/Excel with multiple sheets):
+   ```python
+   import pandas as pd
+   import os
+   import random
+   
+   dfs = []  # List to store (df, source_name) tuples
+   ```
+
+2. **Normalize keys for EACH dataframe INDIVIDUALLY**:
+   - Convert key columns to string
+   - Strip whitespace
+   - Handle NaN/None (replace with '0' or 'UNKNOWN')
+   - DO THIS BEFORE creating MASTER_UID
+
+3. **Create MASTER_UID for EACH dataframe based on schema**:
+   IMPORTANT: Different files may have different key columns!
+   
+   Example logic:
+   ```python
+   # For File1 with columns: PropertyID
+   df1['MASTER_UID'] = df1['PropertyID'].astype(str).str.strip()
+   
+   # For File2 with columns: BuildingID, UnitID
+   df2['MASTER_UID'] = (df2['BuildingID'].astype(str).str.strip() + '_' + 
+                        df2['UnitID'].astype(str).str.strip())
+   
+   # For File3 with columns: Flat_Code (equivalent to File2's BuildingID_UnitID)
+   df3['MASTER_UID'] = df3['Flat_Code'].astype(str).str.strip()
+   ```
+   
+   KEY POINT: Follow the schema's MASTER_UID formula EXACTLY for each file!
+
+4. **Add source tracking** (before concatenation):
+   ```python
+   df['_source_file'] = 'filename_sheet'
+   ```
+
+5. **Concatenate all dataframes**:
+   ```python
+   merged_df = pd.concat(dfs, ignore_index=True, sort=False)
+   ```
+
+6. **Handle column conflicts** (if same column name exists in multiple files):
+   - Use first non-null value OR
+   - Apply aggregation logic
+
+7. **Identify column data types for aggregation**:
+   ```python
+   numeric_cols = merged_df.select_dtypes(include=['number']).columns.tolist()
+   text_cols = merged_df.select_dtypes(include=['object']).columns.tolist()
+   # Remove MASTER_UID from aggregation lists
+   ```
+
+8. **Build aggregation dictionary**:
+   ```python
+   agg_dict = {{}}
+   for col in numeric_cols:
+       if col != 'MASTER_UID':
+           agg_dict[col] = '{state.get("aggregation_strategy", "AGGREGATE_SUM").replace('AGGREGATE_', '').lower()}'  # sum, max, min, mean, count
+   
+   for col in text_cols:
+       if col != 'MASTER_UID':
+           # Take first non-null value or random choice
+           agg_dict[col] = lambda x: x.dropna().iloc[0] if len(x.dropna()) > 0 else None
+   ```
+
+9. **Group by MASTER_UID and aggregate**:
+   ```python
+   final_df = merged_df.groupby('MASTER_UID', as_index=False).agg(agg_dict)
+   ```
+
+10. **Verify output**:
+    ```python
+    assert final_df['MASTER_UID'].nunique() == len(final_df), "ERROR: Duplicate MASTER_UIDs found!"
+    print(f"✅ Unified data created: {{len(final_df)}} unique records")
+    ```
+
+11. **Save to Excel**:
+    ```python
+    final_df.to_excel('{safe_output_path}', index=False, engine='openpyxl')
+    print("SUCCESS: Unified data saved to master_unified_data.xlsx")
+    ```
+
+COMMON PITFALLS TO AVOID:
+- ❌ Creating MASTER_UID with same formula for all files (keys differ by file!)
+- ❌ Not normalizing keys before concatenation (leads to mismatches)
+- ❌ Forgetting to handle NaN in key columns (breaks groupby)
+- ❌ Using wrong aggregation type (text columns don't sum!)
+- ❌ Not verifying unique MASTER_UIDs after aggregation
+
+OUTPUT: Complete, executable Python code only. No markdown, no explanations."""
         
         logger.info("🤖 Calling LLM to generate Python code...")
         response = self._invoke_llm_with_retry(prompt).strip()
