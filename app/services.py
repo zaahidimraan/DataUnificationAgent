@@ -54,12 +54,85 @@ class AgentState(TypedDict):
 
 # --- THE AGENT CLASS ---
 class UnificationGraphAgent:
+    # Multiple API keys for rotation
+    API_KEYS = [
+        "AIzaSyA6F2LGibagOOVH3rZ_NE79Bx0-7akxBg4",
+        "AIzaSyDGKzEn41rJ4poL8e4fhr2jBOLnkqFcX8o",
+        "AIzaSyAVs62C1kvx07V10QTepLNu55An6mIw_Zw",
+        "AIzaSyCdR3frcLjBt9V8tawCbwr9VYPeHYV1Wz0",
+        "AIzaSyAcPP1BPRI6ENPosu7N4PSJok8wT9CPNNk"
+    ]
+    
     def __init__(self):
-        self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash", 
-            temperature=0
-        )
+        self.current_key_index = 0
+        self.llm = self._create_llm()
         self.graph = self._build_graph()
+    
+    def _create_llm(self):
+        """Create LLM instance with current API key."""
+        import os
+        api_key = self.API_KEYS[self.current_key_index]
+        os.environ['GOOGLE_API_KEY'] = api_key
+        logger.info(f"🔑 Using API Key #{self.current_key_index + 1}")
+        return ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            temperature=0,
+            google_api_key=api_key
+        )
+    
+    def _rotate_api_key(self):
+        """Rotate to next API key if available."""
+        if self.current_key_index < len(self.API_KEYS) - 1:
+            self.current_key_index += 1
+            self.llm = self._create_llm()
+            logger.warning(f"🔄 Rotated to API Key #{self.current_key_index + 1}")
+            return True
+        else:
+            logger.error("❌ All API keys exhausted")
+            return False
+    
+    def _invoke_llm_with_retry(self, prompt, max_key_retries=None):
+        """Invoke LLM with automatic key rotation on failure.
+        
+        Args:
+            prompt: The prompt to send to LLM
+            max_key_retries: Maximum number of key rotations (None = try all keys)
+        
+        Returns:
+            LLM response content
+        
+        Raises:
+            Exception: If all keys fail
+        """
+        if max_key_retries is None:
+            max_key_retries = len(self.API_KEYS) - 1
+        
+        keys_tried = 0
+        original_key_index = self.current_key_index
+        
+        while keys_tried <= max_key_retries:
+            try:
+                response = self.llm.invoke(prompt)
+                return response.content
+            except Exception as e:
+                error_str = str(e).lower()
+                # Check if it's a rate limit or quota error
+                if any(keyword in error_str for keyword in ['quota', 'rate limit', 'resource exhausted', '429', 'limit exceeded']):
+                    logger.warning(f"⚠️  API Key #{self.current_key_index + 1} limit reached: {str(e)[:100]}")
+                    
+                    # Try to rotate to next key
+                    if self._rotate_api_key():
+                        keys_tried += 1
+                        continue
+                    else:
+                        # All keys exhausted
+                        raise Exception(f"All {len(self.API_KEYS)} API keys exhausted. Last error: {e}")
+                else:
+                    # Non-quota error, raise immediately
+                    raise e
+        
+        # Should not reach here, but just in case
+        raise Exception(f"Failed to get LLM response after trying {keys_tried + 1} API keys")
     
     def _parse_target_schema(self, target_input, input_type):
         """Parse target schema from user input (file or text).
@@ -342,7 +415,7 @@ SUMMARY: List MASTER files and DETAIL files separately.
 """
         
         logger.info("🤖 Calling LLM to identify keys...")
-        response = self.llm.invoke(prompt).content
+        response = self._invoke_llm_with_retry(prompt)
         logger.info("✅ Identifier proposal generated")
         logger.info(f"📋 Proposal length: {len(response)} characters")
         
@@ -391,7 +464,7 @@ OUTPUT (JSON only):
 }}
 """
         
-        response = self.llm.invoke(prompt).content
+        response = self._invoke_llm_with_retry(prompt)
         
         # Parse JSON response
         try:
@@ -513,7 +586,7 @@ CRITICAL: If you cannot map certain target columns, be explicit about why and ma
 """
         
         logger.info("🤖 Calling LLM to map source data to target schema...")
-        response = self.llm.invoke(prompt).content
+        response = self._invoke_llm_with_retry(prompt)
         logger.info("✅ Target schema mapping proposal generated")
         logger.info(f"📋 Mapping length: {len(response)} characters")
         
@@ -581,7 +654,7 @@ OUTPUT (JSON only):
 }}
 """
         
-        response = self.llm.invoke(prompt).content
+        response = self._invoke_llm_with_retry(prompt)
         
         # Parse JSON response
         try:
@@ -674,7 +747,7 @@ OUTPUT:
 """
         
         logger.info("🤖 Calling LLM to design schema...")
-        response = self.llm.invoke(prompt).content
+        response = self._invoke_llm_with_retry(prompt)
         logger.info("✅ Schema proposal generated")
         logger.info(f"📋 Schema length: {len(response)} characters")
         
@@ -712,7 +785,7 @@ OUTPUT (JSON):
 }}
 """
         
-        response = self.llm.invoke(evaluation_prompt).content
+        response = self._invoke_llm_with_retry(evaluation_prompt)
         
         # Parse JSON response
         try:
@@ -828,7 +901,7 @@ Code structure:
 OUTPUT: Python code only, no markdown."""
         
         logger.info("🤖 Calling LLM to generate Python code...")
-        response = self.llm.invoke(prompt).content.strip()
+        response = self._invoke_llm_with_retry(prompt).strip()
         
         # Clean code blocks
         code = response.replace("```python", "").replace("```", "").strip()
@@ -978,7 +1051,7 @@ OUTPUT (JSON):
 }}
 """
             
-            response = self.llm.invoke(prompt).content
+            response = self._invoke_llm_with_retry(prompt)
             
             try:
                 json_str = response.strip()
