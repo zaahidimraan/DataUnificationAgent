@@ -1,6 +1,7 @@
 import pandas as pd
 import os
 import json
+import time
 from typing import Annotated, List, Dict, TypedDict, Union
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, END
@@ -87,7 +88,9 @@ class UnificationGraphAgent:
         return ChatGoogleGenerativeAI(
             model="gemini-2.5-flash",
             temperature=0,
-            google_api_key=api_key
+            google_api_key=api_key,
+            timeout=120,
+            max_retries=2
         )
     
     def _rotate_api_key(self):
@@ -101,48 +104,78 @@ class UnificationGraphAgent:
             logger.error("❌ All API keys exhausted")
             return False
     
-    def _invoke_llm_with_retry(self, prompt, max_key_retries=None):
-        """Invoke LLM with automatic key rotation on failure.
+    def _invoke_llm_with_retry(self, prompt, max_key_retries=None, max_network_retries=3):
+        """Invoke LLM with automatic key rotation and network error retry.
         
         Args:
             prompt: The prompt to send to LLM
             max_key_retries: Maximum number of key rotations (None = try all keys)
+            max_network_retries: Maximum retries per key for network/transient errors
         
         Returns:
             LLM response content
         
         Raises:
-            Exception: If all keys fail
+            Exception: If all keys and retries fail
         """
         if max_key_retries is None:
             max_key_retries = len(self.API_KEYS) - 1
         
+        # Network/transient error keywords that should trigger retry (not key rotation)
+        network_error_keywords = [
+            'socket', 'connection', 'timeout', 'timed out', 'unreachable',
+            'disconnected', 'reset by peer', 'broken pipe', 'eof occurred',
+            'remotedisconnected', 'connectionerror', 'networkerror',
+            'server disconnected', 'without sending a response',
+            'sslerror', 'temporary failure', 'name resolution',
+            'getaddrinfo failed', 'max retries exceeded', 'connect timeout'
+        ]
+        
         keys_tried = 0
-        original_key_index = self.current_key_index
         
         while keys_tried <= max_key_retries:
-            try:
-                response = self.llm.invoke(prompt)
-                return response.content
-            except Exception as e:
-                error_str = str(e).lower()
-                # Check if it's a rate limit or quota error
-                if any(keyword in error_str for keyword in ['quota', 'rate limit', 'resource exhausted', '429', 'limit exceeded']):
-                    logger.warning(f"⚠️  API Key #{self.current_key_index + 1} limit reached: {str(e)[:100]}")
+            # Retry loop for network/transient errors on the SAME key
+            for network_attempt in range(max_network_retries):
+                try:
+                    response = self.llm.invoke(prompt)
+                    return response.content
+                except Exception as e:
+                    error_str = str(e).lower()
                     
-                    # Try to rotate to next key
-                    if self._rotate_api_key():
-                        keys_tried += 1
-                        continue
+                    # Check if it's a rate limit or quota error → rotate key
+                    if any(kw in error_str for kw in ['quota', 'rate limit', 'resource exhausted', '429', 'limit exceeded']):
+                        logger.warning(f"⚠️  API Key #{self.current_key_index + 1} limit reached: {str(e)[:100]}")
+                        break  # Break inner loop to rotate key
+                    
+                    # Check if it's a network/transient error → retry same key with backoff
+                    elif any(kw in error_str for kw in network_error_keywords):
+                        wait_time = (2 ** network_attempt) * 3  # 3s, 6s, 12s
+                        logger.warning(
+                            f"🌐 Network error on Key #{self.current_key_index + 1} "
+                            f"(attempt {network_attempt + 1}/{max_network_retries}): {str(e)[:100]}"
+                        )
+                        if network_attempt < max_network_retries - 1:
+                            logger.info(f"⏳ Retrying in {wait_time}s...")
+                            time.sleep(wait_time)
+                            # Recreate the LLM instance (fresh connection)
+                            self.llm = self._create_llm()
+                            continue
+                        else:
+                            logger.warning(f"🌐 Network retries exhausted on Key #{self.current_key_index + 1}, trying next key...")
+                            break  # Break inner loop to try next key
+                    
                     else:
-                        # All keys exhausted
-                        raise Exception(f"All {len(self.API_KEYS)} API keys exhausted. Last error: {e}")
-                else:
-                    # Non-quota error, raise immediately
-                    raise e
+                        # Unknown error, raise immediately
+                        raise e
+            
+            # Try to rotate to next key
+            if self._rotate_api_key():
+                keys_tried += 1
+                continue
+            else:
+                raise Exception(f"All {len(self.API_KEYS)} API keys exhausted after network retries. Check your internet connection.")
         
-        # Should not reach here, but just in case
-        raise Exception(f"Failed to get LLM response after trying {keys_tried + 1} API keys")
+        raise Exception(f"Failed to get LLM response after trying {keys_tried + 1} API keys with network retries")
     
     def _parse_target_schema(self, target_input, input_type):
         """Parse target schema from user input (file or text).
