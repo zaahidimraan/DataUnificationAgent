@@ -164,11 +164,21 @@ def process_files():
             log_info("⏸️  One-to-many detected - showing user options")
             log_info(f"   Stored session: {session_id}")
             
+            # Parse detail files info for UI display
+            detail_files_info = state.get("detail_files_info", "")
+            detail_files_list = []
+            if detail_files_info:
+                try:
+                    detail_files_list = json.loads(detail_files_info)
+                except:
+                    detail_files_list = []
+            
             flash("⚠️  One-to-many relationships detected in your data!", "warning")
             return render_template('index.html', 
                                  show_one_to_many_modal=True,
                                  one_to_many_detected=True,
-                                 session_id=session_id)
+                                 session_id=session_id,
+                                 detail_files_info=detail_files_list)
         
         if success:
             log_info("✅ LangGraph agent processing completed successfully")
