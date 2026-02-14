@@ -28,9 +28,10 @@ class AgentState(TypedDict):
     
     # Phase 1.5: One-to-Many Resolution State (NEW)
     one_to_many_detected: bool
-    one_to_many_resolution: str  # 'auto_solve', 'aggregate_max', 'aggregate_min', 'aggregate_sum', 'aggregate_avg', 'multi_file'
-    aggregation_strategy: str  # LLM's recommended strategy
+    one_to_many_resolution: str  # 'auto_solve', 'keep_all', 'aggregate_max', 'aggregate_min', 'aggregate_sum', 'aggregate_avg', 'multi_file'
+    aggregation_strategy: str  # LLM's recommended strategy or 'KEEP_ALL'
     user_intent: str  # What user wants to achieve
+    detail_files_info: str  # Per-file MASTER/DETAIL classification for UI display
     
     # Target Schema Mode State (NEW)
     target_mode_enabled: bool  # Is target mode active?
@@ -54,23 +55,32 @@ class AgentState(TypedDict):
 
 # --- THE AGENT CLASS ---
 class UnificationGraphAgent:
-    # Multiple API keys for rotation
-    API_KEYS = [
-        "AIzaSyA6F2LGibagOOVH3rZ_NE79Bx0-7akxBg4",
-        "AIzaSyDGKzEn41rJ4poL8e4fhr2jBOLnkqFcX8o",
-        "AIzaSyAVs62C1kvx07V10QTepLNu55An6mIw_Zw",
-        "AIzaSyCdR3frcLjBt9V8tawCbwr9VYPeHYV1Wz0",
-        "AIzaSyAcPP1BPRI6ENPosu7N4PSJok8wT9CPNNk"
-    ]
+    
+    @staticmethod
+    def _load_api_keys():
+        """Load API keys from environment variables (GOOGLE_API_KEY_1, GOOGLE_API_KEY_2, ...)."""
+        keys = []
+        i = 1
+        while True:
+            key = os.environ.get(f"GOOGLE_API_KEY_{i}")
+            if key:
+                keys.append(key)
+                i += 1
+            else:
+                break
+        if not keys:
+            raise ValueError("No API keys found in environment. Set GOOGLE_API_KEY_1, GOOGLE_API_KEY_2, ... in .env")
+        logger.info(f"🔑 Loaded {len(keys)} API key(s) from environment")
+        return keys
     
     def __init__(self):
+        self.API_KEYS = self._load_api_keys()
         self.current_key_index = 0
         self.llm = self._create_llm()
         self.graph = self._build_graph()
     
     def _create_llm(self):
         """Create LLM instance with current API key."""
-        import os
         api_key = self.API_KEYS[self.current_key_index]
         os.environ['GOOGLE_API_KEY'] = api_key
         logger.info(f"🔑 Using API Key #{self.current_key_index + 1}")
@@ -382,8 +392,7 @@ class UnificationGraphAgent:
         logger.info("="*60)
         logger.info("🔍 PHASE 1: IDENTIFICATION")
         logger.info(f"Attempt #{retry_count + 1}")
-        if previous_feedback:
-            logger.info(f"📝 Addressing feedback from previous attempt")
+        logger.info(f"📝 Addressing feedback from previous attempt")
         logger.info("="*60)
         
         feedback_context = ""
@@ -453,11 +462,56 @@ SUMMARY: List MASTER files and DETAIL files separately.
             has_one_to_many = True
             logger.warning("⚠️  ONE-TO-MANY relationship detected in data structure")
         
+        # Extract per-file MASTER/DETAIL classification for UI display
+        detail_files_info = ""
+        if has_one_to_many:
+            detail_files_info = self._extract_file_classifications(response, state['file_paths'])
+            if detail_files_info:
+                logger.info(f"📋 File classifications extracted for user display")
+        
         return {
             "identifiers": response,
             "id_retries": retry_count + 1,
-            "has_one_to_many": has_one_to_many
+            "has_one_to_many": has_one_to_many,
+            "detail_files_info": detail_files_info
         }
+
+    def _extract_file_classifications(self, identifier_response, file_paths):
+        """Extract per-file MASTER/DETAIL classification from identifier LLM response.
+        
+        Returns a JSON string with per-file info for UI display.
+        """
+        try:
+            filenames = [os.path.basename(p) for p in file_paths]
+            classifications = []
+            
+            for filename in filenames:
+                file_info = {"filename": filename, "type": "UNKNOWN", "description": ""}
+                
+                # Search in identifier response for this file's classification
+                response_upper = identifier_response.upper()
+                fname_upper = filename.upper()
+                
+                # Find the section about this file
+                idx = response_upper.find(fname_upper)
+                if idx != -1:
+                    # Get surrounding context (500 chars after filename mention)
+                    context = identifier_response[max(0, idx):idx + 500]
+                    
+                    if 'DETAIL' in context.upper():
+                        file_info["type"] = "DETAIL"
+                        file_info["description"] = "Multiple records per entity (e.g., history, transactions, logs)"
+                    elif 'MASTER' in context.upper():
+                        file_info["type"] = "MASTER"
+                        file_info["description"] = "One record per entity (reference/master data)"
+                    
+                classifications.append(file_info)
+            
+            return json.dumps(classifications)
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Could not extract file classifications: {e}")
+            return ""
 
     def node_id_evaluator(self, state: AgentState):
         """Evaluates the identification proposal with a confidence score."""
@@ -567,11 +621,23 @@ CRITICAL: Address ALL issues mentioned above. Use the feedback to improve your m
         # Prepare aggregation context if one-to-many detected
         aggregation_context = ""
         if state.get("one_to_many_detected"):
-            aggregation_context = f"""
-ONE-TO-MANY RELATIONSHIP DETECTED:
-- Aggregation strategy: {state.get('aggregation_strategy', 'AGGREGATE_SUM')}
-- Apply this strategy when mapping numeric fields to target columns
+            strategy = state.get('aggregation_strategy', 'AGGREGATE_SUM')
+            if strategy == "KEEP_ALL":
+                aggregation_context = f"""
+ONE-TO-MANY RELATIONSHIP DETECTED - STRATEGY: KEEP ALL RECORDS
+- The user wants ALL detail/transaction rows PRESERVED in the output
+- DO NOT aggregate or collapse rows
+- Each detail record (e.g., each repair, each transaction) must appear as its own row
+- Master data columns should be repeated/joined for each detail row
+- Output granularity: ONE ROW PER DETAIL RECORD (not per master entity)
+- This means the output will have MULTIPLE rows per master entity
+"""
+            else:
+                aggregation_context = f"""
+ONE-TO-MANY RELATIONSHIP DETECTED - STRATEGY: {strategy}
+- Apply {strategy.replace('AGGREGATE_', '').lower()} aggregation when mapping numeric fields to target columns
 - For text fields: use random selection from grouped values
+- Output granularity: ONE ROW PER MASTER ENTITY
 """
         
         prompt = f"""You are designing a unified data schema to match the USER'S TARGET SPECIFICATION.
@@ -595,12 +661,23 @@ Map source data columns to the target schema specified by the user. You MUST:
 3. **Handle missing target columns** - If target asks for columns that don't exist in source:
    - Try to derive them (e.g., "total_sales" = sum of sale amounts)
    - If impossible to derive, mark as "UNMAPPABLE - <reason>"
-4. **Respect aggregation strategy** - If one-to-many detected, apply the aggregation strategy
-5. **Maintain data integrity** - Ensure keys/identifiers are properly mapped
+4. **Respect the data handling strategy**:
+   - If KEEP_ALL: Preserve every detail row. DO NOT aggregate. Join master data to each detail row.
+   - If AGGREGATE_*: Apply the specified aggregation to collapse detail rows per master entity.
+5. **Analyze user's target text for intent clues**:
+   - "complete history", "all records", "full log", "detailed" → confirms KEEP_ALL behavior
+   - "summary", "total", "per property" → confirms aggregation behavior
+   - If user's text contradicts the strategy, FOLLOW THE STRATEGY but note the conflict
+6. **Maintain data integrity** - Ensure keys/identifiers are properly mapped
 
 OUTPUT FORMAT (use this exact structure):
 # GRANULARITY
-<Describe the data granularity: one row per what entity?>
+<Describe the data granularity based on strategy:
+  - KEEP_ALL: one row per detail record (multiple rows per master entity)
+  - AGGREGATE: one row per master entity>
+
+# DATA HANDLING STRATEGY
+<KEEP_ALL or AGGREGATE with specific function>
 
 # TARGET MODE
 ENABLED - Mapping to user-defined target schema
@@ -612,7 +689,7 @@ ENABLED - Mapping to user-defined target schema
 For each target column the user requested, provide:
 - Column Name: <exact name from target>
 - Source Mapping: <which source column(s) map to this>
-- Transformation: <any calculation/aggregation needed>
+- Transformation: <any calculation/aggregation needed, or "direct mapping" for KEEP_ALL>
 - Status: MAPPED or UNMAPPABLE
 
 # KEYS
@@ -750,6 +827,26 @@ OUTPUT (JSON only):
         if previous_feedback:
             feedback_context = f"\nPREVIOUS FEEDBACK: {previous_feedback}\nFix these."
         
+        # Determine strategy context based on aggregation strategy
+        strategy = state.get("aggregation_strategy", "")
+        if strategy == "KEEP_ALL":
+            strategy_context = """
+DATA HANDLING STRATEGY: KEEP ALL RECORDS
+- PRESERVE all detail/transaction rows in the output
+- DO NOT aggregate or collapse rows
+- Join master data to each detail row (left join)
+- Output will have MULTIPLE rows per master entity
+- Each detail record appears as its own row with master data attached
+- Result: ONE file with ALL detail rows preserved
+"""
+        else:
+            strategy_context = f"""
+CRITICAL: ALWAYS CREATE SINGLE FILE OUTPUT. Even if data has MASTER+DETAIL:
+- For numeric fields: apply aggregation (sum, avg, min, max, count)
+- For text fields: randomly select from aggregated rows (or first value for MAX/MIN)
+- Result: ONE row per master record
+"""
+        
         prompt = f"""Design unified schema that preserves all data.
 
 IDENTIFIERS:
@@ -757,11 +854,7 @@ IDENTIFIERS:
 
 DATA:
 {state['dfs_sample_str']}
-
-CRITICAL: ALWAYS CREATE SINGLE FILE OUTPUT. Even if data has MASTER+DETAIL:
-- For numeric fields: apply aggregation (sum, avg, min, max, count)
-- For text fields: randomly select from aggregated rows (or first value for MAX/MIN)
-- Result: ONE row per master record
+{strategy_context}
 
 REQUIREMENTS:
 1. Analyze granularity: All same level or mixed?  
@@ -769,17 +862,18 @@ REQUIREMENTS:
    - Show which column from which file
    - If keys are equivalent across files, map them clearly
    - Formula must work even if some files don't have all keys
-3. List all value columns to keep (will be aggregated smartly)
-4. ALWAYS state SINGLE FILE (even if granularity is mixed with master+detail)
+3. List all value columns to keep
+4. ALWAYS state SINGLE FILE output
+5. State data handling strategy: {"KEEP_ALL (preserve all detail rows)" if strategy == "KEEP_ALL" else "AGGREGATE (one row per master entity)"}
 
 {feedback_context}
 
 OUTPUT:
 # GRANULARITY
-<All same level OR mixed (master+detail) - doesn't matter, output is single file>
+<All same level OR mixed (master+detail)>
 
-# STRATEGY
-<Always: Single file with smart aggregation per data type>
+# DATA HANDLING STRATEGY
+<{"KEEP_ALL - Preserve all detail rows, join master data to each detail row" if strategy == "KEEP_ALL" else "AGGREGATE - Single file with smart aggregation per data type, one row per master entity"}>
 
 # KEYS AND MASTER_UID CREATION
 Key columns from each file:
@@ -904,41 +998,125 @@ OUTPUT (JSON):
         
         safe_output_path = os.path.join(state['output_folder'], 'master_unified_data.xlsx').replace("\\", "/")
         
-        # Include aggregation strategy if one-to-many detected
+        # Include strategy section based on one-to-many handling
         aggregation_section = ""
-        if state.get("one_to_many_detected"):
-                strategy = state.get("aggregation_strategy", "AGGREGATE_SUM")
+        strategy = state.get("aggregation_strategy", "")
+        
+        if state.get("one_to_many_detected") and strategy == "KEEP_ALL":
+            # KEEP_ALL strategy - preserve all detail rows
+            aggregation_section = f"""
+ONE-TO-MANY STRATEGY: KEEP_ALL (Preserve All Detail Records)
+
+⚠️ CRITICAL RULES FOR KEEP_ALL:
+1. ALWAYS create ONE file only to '{safe_output_path}'
+2. DO NOT aggregate or groupby - preserve every detail row
+3. Join master data to detail data using merge/join (left join on MASTER_UID)
+4. Each detail record (repair, transaction, log entry) appears as its own row
+5. Master data columns are REPEATED for each detail row
+6. Output will have MULTIPLE rows per master entity - THIS IS CORRECT
+7. DO NOT use groupby().agg() - that destroys the detail data!
+
+Code structure for KEEP_ALL:
+- Load all files, create MASTER_UID per file
+- Identify which files are MASTER (one row per entity) and DETAIL (many rows per entity)
+- Concatenate all data with MASTER_UID
+- Use pd.merge() to join master columns to detail rows
+- OR simply pd.concat() if all files share MASTER_UID column
+- Save ALL rows to output - do NOT collapse/aggregate
+"""
+        elif state.get("one_to_many_detected"):
+            # Aggregation strategy
+            agg_type = strategy.replace('AGGREGATE_', '').lower() if strategy else 'sum'
             
-                # Map strategy to aggregation type
-                agg_type = strategy.replace('AGGREGATE_', '').lower()
-            
-                aggregation_section = f"""
+            aggregation_section = f"""
 ONE-TO-MANY AGGREGATION STRATEGY: {strategy}
 
-⚠️ CRITICAL RULES FOR SINGLE FILE OUTPUT:
-1. ALWAYS create ONE file only, even if there's data loss
+⚠️ CRITICAL RULES FOR AGGREGATION:
+1. ALWAYS create ONE file only to '{safe_output_path}'
 2. For NUMERIC fields:
     - Apply {agg_type} using groupby aggregation
-    - {agg_type}.upper() = sum/avg/min/max/count values per master record
 3. For TEXT/DATE fields:
     - If strategy is MAX/MIN: use that strategy
     - Otherwise: Use RANDOM selection from aggregated rows (random.choice on unique values)
-    - Include complete row data with the selected value
 4. For fields that can't be aggregated properly:
     - Leave empty or use first non-null value
 5. DO NOT create multiple files
-6. DO NOT preserve all detail records as separate rows
-7. Result: ONE row per master record with aggregated/selected values
-
-Aggregation mapping:
-  - AGGREGATE_MAX: df.groupby('MASTER_UID').max() (or random for text)
-  - AGGREGATE_MIN: df.groupby('MASTER_UID').min() (or random for text)
-  - AGGREGATE_SUM: df.groupby('MASTER_UID').sum() (or random for text)
-  - AGGREGATE_AVG: df.groupby('MASTER_UID').mean() (or random for text)
-  - AGGREGATE_COUNT: Use df.groupby('MASTER_UID').size() for counts + random for text fields
+6. Result: ONE row per master record with aggregated/selected values
 """
         
-        prompt = f"""Generate Python code to implement the schema.
+        if strategy == "KEEP_ALL":
+            prompt = f"""Generate Python code to implement the schema with KEEP_ALL strategy.
+
+SCHEMA:
+{state['schema']}{aggregation_section}
+
+FILES:
+{state['file_paths']}
+
+CRITICAL REQUIREMENTS:
+1. Output EXACTLY ONE file to '{safe_output_path}'
+2. PRESERVE ALL DETAIL ROWS - do NOT aggregate/collapse
+3. Join master data to each detail row using MASTER_UID
+4. Output has MULTIPLE rows per master entity (this is the correct behavior)
+
+Code structure (FOLLOW EXACTLY):
+
+1. **Load all dataframes** (handle CSV/Excel with multiple sheets):
+   ```python
+   import pandas as pd
+   import os
+   
+   dfs = {{}}  # Dict to store dataframes by source name
+   ```
+
+2. **Normalize keys for EACH dataframe INDIVIDUALLY**:
+   - Convert key columns to string, strip whitespace
+   - Handle NaN/None (replace with '0' or 'UNKNOWN')
+
+3. **Create MASTER_UID for EACH dataframe based on schema**:
+   IMPORTANT: Different files may have different key columns!
+   Follow the schema's MASTER_UID formula EXACTLY for each file.
+
+4. **Add source tracking**:
+   ```python
+   df['_source_file'] = 'filename_sheet'
+   ```
+
+5. **Merge strategy for KEEP_ALL**:
+   - Identify MASTER files (one row per MASTER_UID) and DETAIL files (many rows per MASTER_UID)
+   - Start with the DETAIL file(s) as the base (to preserve all rows)
+   - Left-join MASTER file columns onto DETAIL rows using MASTER_UID
+   - If multiple DETAIL files: concatenate them first, then join master data
+   
+   ```python
+   # Example:
+   # detail_df has many rows per MASTER_UID (e.g., repairs, transactions)
+   # master_df has one row per MASTER_UID (e.g., property info)
+   # final_df = detail_df.merge(master_df, on='MASTER_UID', how='left', suffixes=('', '_master'))
+   ```
+
+6. **Handle column conflicts** (same column name in multiple files):
+   - Use suffixes in merge OR rename before merge
+
+7. **DO NOT groupby or aggregate** - keep all rows as-is
+
+8. **Save to Excel**:
+   ```python
+   final_df.to_excel('{safe_output_path}', index=False, engine='openpyxl')
+   print(f"SUCCESS: Unified data saved with {{len(final_df)}} total records")
+   print(f"MASTER_UIDs: {{final_df['MASTER_UID'].nunique()}} unique entities")
+   ```
+
+COMMON PITFALLS TO AVOID:
+- ❌ Using groupby().agg() - this DESTROYS detail rows!
+- ❌ Creating MASTER_UID with same formula for all files
+- ❌ Not normalizing keys before merge
+- ❌ Losing detail rows during merge (use left join from detail side)
+
+OUTPUT: Complete, executable Python code only. No markdown, no explanations."""
+
+        else:
+            prompt = f"""Generate Python code to implement the schema.
 
 SCHEMA:
 {state['schema']}{aggregation_section}
@@ -949,8 +1127,7 @@ FILES:
 CRITICAL REQUIREMENTS:
 1. ALWAYS output EXACTLY ONE file to '{safe_output_path}'
 2. NEVER create multiple files
-3. NEVER preserve all detail rows as separate records
-4. FOCUS: Create one unified master file with aggregated/merged data
+3. FOCUS: Create one unified master file with aggregated/merged data
 
 For one-to-many data:
 - Group by master record (MASTER_UID)
@@ -986,9 +1163,6 @@ Code structure (FOLLOW EXACTLY):
    # For File2 with columns: BuildingID, UnitID
    df2['MASTER_UID'] = (df2['BuildingID'].astype(str).str.strip() + '_' + 
                         df2['UnitID'].astype(str).str.strip())
-   
-   # For File3 with columns: Flat_Code (equivalent to File2's BuildingID_UnitID)
-   df3['MASTER_UID'] = df3['Flat_Code'].astype(str).str.strip()
    ```
    
    KEY POINT: Follow the schema's MASTER_UID formula EXACTLY for each file!
@@ -1019,11 +1193,10 @@ Code structure (FOLLOW EXACTLY):
    agg_dict = {{}}
    for col in numeric_cols:
        if col != 'MASTER_UID':
-           agg_dict[col] = '{state.get("aggregation_strategy", "AGGREGATE_SUM").replace('AGGREGATE_', '').lower()}'  # sum, max, min, mean, count
+           agg_dict[col] = '{strategy.replace("AGGREGATE_", "").lower() if strategy else "sum"}'
    
    for col in text_cols:
        if col != 'MASTER_UID':
-           # Take first non-null value or random choice
            agg_dict[col] = lambda x: x.dropna().iloc[0] if len(x.dropna()) > 0 else None
    ```
 
@@ -1173,34 +1346,66 @@ OUTPUT: Complete, executable Python code only. No markdown, no explanations."""
         # Check if user has already provided resolution choice
         user_choice = state.get("one_to_many_resolution", "")
         
-        if user_choice == "auto_solve":
-            logger.info("🤖 AUTO-SOLVE MODE: LLM will intelligently aggregate data")
-            logger.info("   Analyzing data structure to determine best aggregation...")
+        if user_choice == "keep_all":
+            # User explicitly wants ALL detail rows preserved
+            logger.info("👤 USER CHOICE: KEEP ALL RECORDS")
+            logger.info("   All detail/transaction rows will be preserved in output")
+            logger.info("   Output will have multiple rows per master entity")
+            logger.info("✅ Proceeding with KEEP_ALL strategy")
             
-            # LLM decides best aggregation strategy
-            prompt = f"""Analyze this data structure and recommend the BEST aggregation strategy.
+            return {
+                "one_to_many_detected": True,
+                "one_to_many_resolution": "keep_all",
+                "aggregation_strategy": "KEEP_ALL",
+                "user_intent": "keep_all"
+            }
+        
+        elif user_choice == "auto_solve":
+            logger.info("🤖 AUTO-SOLVE MODE: LLM will intelligently determine data handling...")
+            
+            # Check if target mode is active - if so, use target text to inform strategy
+            target_text = state.get("target_schema_input", "")
+            target_context = ""
+            if state.get("target_mode_enabled", False) and target_text:
+                target_context = f"""
+USER'S TARGET SPECIFICATION (CRITICAL - this tells you what the user actually wants):
+{target_text}
+
+IMPORTANT: Analyze the user's target text carefully:
+- If user mentions "complete history", "all records", "full log", "detailed", "every transaction", 
+  "repair history", "all repairs", etc. → recommend KEEP_ALL
+- If user mentions "summary", "total", "aggregate", "per property", "one row per" → recommend aggregation
+- The user's intent in target text OVERRIDES default aggregation behavior
+"""
+            
+            prompt = f"""Analyze this data structure and recommend the BEST strategy for handling one-to-many data.
 
 IDENTIFIERS:
 {state['identifiers']}
 
 DATA:
 {state['dfs_sample_str']}
+{target_context}
 
 Your data has one-to-many relationships. Choose ONE strategy:
-1. AGGREGATE_MAX: Keep maximum values from detail records
-2. AGGREGATE_MIN: Keep minimum values from detail records  
-3. AGGREGATE_SUM: Sum all detail record values
-4. AGGREGATE_AVG: Average all detail record values
-5. AGGREGATE_COUNT: Count detail records per master
+1. KEEP_ALL: Preserve ALL detail rows (multiple rows per master entity in output)
+   - Best when: user wants complete history/logs/transaction details
+   - Output: Each detail record appears as its own row, joined with master data
+2. AGGREGATE_MAX: Keep maximum values from detail records
+3. AGGREGATE_MIN: Keep minimum values from detail records  
+4. AGGREGATE_SUM: Sum all detail record values
+5. AGGREGATE_AVG: Average all detail record values
+6. AGGREGATE_COUNT: Count detail records per master
 
-Considering the data nature and business logic, choose the BEST ONE ONLY.
+Considering the data nature, business logic, and especially the USER'S TARGET TEXT (if provided), 
+choose the BEST ONE ONLY.
 
 REQUIREMENT: You MUST recommend ONE and ONLY ONE strategy.
 
 OUTPUT (JSON):
 {{
-  "recommended_strategy": "<AGGREGATE_MAX, AGGREGATE_MIN, AGGREGATE_SUM, AGGREGATE_AVG, or AGGREGATE_COUNT>",
-  "reasoning": "<Why this is best for this data>"
+  "recommended_strategy": "<KEEP_ALL, AGGREGATE_MAX, AGGREGATE_MIN, AGGREGATE_SUM, AGGREGATE_AVG, or AGGREGATE_COUNT>",
+  "reasoning": "<Why this is best for this data and user intent>"
 }}
 """
             
@@ -1224,7 +1429,7 @@ OUTPUT (JSON):
                 logger.warning(f"⚠️  Could not parse LLM recommendation: {e}")
                 strategy = "AGGREGATE_SUM"  # Fallback to safe option
             
-            logger.info("✅ Auto-solve complete - proceeding with aggregation")
+            logger.info(f"✅ Auto-solve complete - proceeding with strategy: {strategy}")
             return {
                 "one_to_many_detected": True,
                 "one_to_many_resolution": strategy,
@@ -1617,6 +1822,7 @@ OUTPUT (JSON):
             "one_to_many_resolution": one_to_many_choice or "",  # Pre-set if user provided choice
             "aggregation_strategy": "",
             "user_intent": one_to_many_choice or "",
+            "detail_files_info": "",
             
             # Target Schema Mode State (NEW)
             "target_mode_enabled": target_mode_enabled,
@@ -1676,9 +1882,13 @@ OUTPUT (JSON):
             
             if final_state.get('one_to_many_detected'):
                 agg_strategy = final_state.get('aggregation_strategy', 'N/A')
-                logger.info(f"   - One-to-many data aggregated using: {agg_strategy}")
-                logger.info("   - Numeric fields: aggregated per strategy")
-                logger.info("   - Text fields: randomly selected from detail records")
+                if agg_strategy == 'KEEP_ALL':
+                    logger.info(f"   - One-to-many data: ALL detail rows preserved")
+                    logger.info("   - Master data joined to each detail row")
+                else:
+                    logger.info(f"   - One-to-many data aggregated using: {agg_strategy}")
+                    logger.info("   - Numeric fields: aggregated per strategy")
+                    logger.info("   - Text fields: randomly selected from detail records")
             logger.info("   - Output: Single unified file with all data merged")
             logger.info("✅ " + "="*55)
             logger.info("")

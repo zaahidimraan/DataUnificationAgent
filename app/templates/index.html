@@ -104,20 +104,66 @@
                         <li><strong>Master/Reference data:</strong> One record per entity (e.g., Customer, Property)</li>
                         <li><strong>Detail/Transaction data:</strong> Multiple records per entity (e.g., Orders, History)</li>
                     </ul>
-                    <p class="mt-4 mb-3"><strong>How would you like to proceed?</strong></p>
+
+                    {% if detail_files_info %}
+                    <div class="alert alert-info mt-3 mb-3">
+                        <strong>📋 File Classifications:</strong>
+                        <table class="table table-sm table-bordered mt-2 mb-0 bg-white">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>File</th>
+                                    <th>Type</th>
+                                    <th>Description</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for file_info in detail_files_info %}
+                                <tr>
+                                    <td>{{ file_info.filename }}</td>
+                                    <td>
+                                        {% if file_info.type == 'DETAIL' %}
+                                            <span class="badge bg-warning text-dark">DETAIL</span>
+                                        {% elif file_info.type == 'MASTER' %}
+                                            <span class="badge bg-success">MASTER</span>
+                                        {% else %}
+                                            <span class="badge bg-secondary">UNKNOWN</span>
+                                        {% endif %}
+                                    </td>
+                                    <td class="small">{{ file_info.description }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% endif %}
+
+                    <p class="mt-4 mb-3"><strong>How would you like to handle the detail records?</strong></p>
 
                     <form action="/process" method="post" enctype="multipart/form-data" id="oneToManyForm">
                         <!-- Pass session ID to retrieve stored files -->
                         <input type="hidden" name="session_id" value="{{ session_id }}">
                         
+                        <!-- Keep All Records Option -->
+                        <label class="option-card">
+                            <input type="radio" name="one_to_many_choice" value="keep_all">
+                            <div class="option-content">
+                                <strong>📋 Keep All Records (Preserve Complete History)</strong>
+                                <p class="text-muted small mt-2">Preserve ALL detail rows in the output. Master data will be joined to each detail row. 
+                                <br><em>Best for: complete repair history, full transaction logs, detailed records you want to keep intact.</em></p>
+                            </div>
+                        </label>
+
                         <!-- Auto-Solve Option -->
                         <label class="option-card">
                             <input type="radio" name="one_to_many_choice" value="auto_solve" checked>
                             <div class="option-content">
                                 <strong>🤖 Auto-Solve (Recommended)</strong>
-                                <p class="text-muted small mt-2">Let our AI choose the best aggregation strategy for your data</p>
+                                <p class="text-muted small mt-2">Let our AI choose the best strategy for your data (may keep all or aggregate based on data analysis)</p>
                             </div>
                         </label>
+
+                        <hr class="my-3">
+                        <p class="text-muted small mb-2"><strong>Aggregation options</strong> (collapse detail rows into one row per master entity):</p>
 
                         <!-- Aggregate Max -->
                         <label class="option-card">
