@@ -669,7 +669,10 @@ ONE-TO-MANY RELATIONSHIP DETECTED - STRATEGY: KEEP ALL RECORDS
                 aggregation_context = f"""
 ONE-TO-MANY RELATIONSHIP DETECTED - STRATEGY: {strategy}
 - Apply {strategy.replace('AGGREGATE_', '').lower()} aggregation when mapping numeric fields to target columns
-- For text fields: use random selection from grouped values
+- For text/categorical fields (names, statuses, types): use MODE (most frequent value)
+- For date fields: use latest (max) date by default
+- For descriptive text fields (notes, comments, descriptions): concatenate unique values with ' | '
+- For any other non-numeric: use first non-null value as fallback
 - Output granularity: ONE ROW PER MASTER ENTITY
 """
         
@@ -876,7 +879,10 @@ DATA HANDLING STRATEGY: KEEP ALL RECORDS
             strategy_context = f"""
 CRITICAL: ALWAYS CREATE SINGLE FILE OUTPUT. Even if data has MASTER+DETAIL:
 - For numeric fields: apply aggregation (sum, avg, min, max, count)
-- For text fields: randomly select from aggregated rows (or first value for MAX/MIN)
+- For text/categorical fields (names, statuses, types): use MODE (most frequent value)
+- For date fields: use latest (max) date
+- For descriptive text fields (notes, comments): concatenate unique values with ' | '
+- For any other non-numeric: use first non-null value as fallback
 - Result: ONE row per master record
 """
         
@@ -1068,13 +1074,20 @@ ONE-TO-MANY AGGREGATION STRATEGY: {strategy}
 1. ALWAYS create ONE file only to '{safe_output_path}'
 2. For NUMERIC fields:
     - Apply {agg_type} using groupby aggregation
-3. For TEXT/DATE fields:
-    - If strategy is MAX/MIN: use that strategy
-    - Otherwise: Use RANDOM selection from aggregated rows (random.choice on unique values)
-4. For fields that can't be aggregated properly:
-    - Leave empty or use first non-null value
-5. DO NOT create multiple files
-6. Result: ONE row per master record with aggregated/selected values
+3. For TEXT/CATEGORICAL fields (e.g., names, statuses, categories, types):
+    - Use MODE (most frequent value) via: lambda x: x.dropna().mode().iloc[0] if len(x.dropna()) > 0 else None
+    - This picks the most representative/common value from the group
+4. For DATE/DATETIME fields:
+    - If strategy is MAX: use the latest (max) date
+    - If strategy is MIN: use the earliest (min) date
+    - Otherwise: use the latest (max) date as default (most recent is usually most relevant)
+5. For DESCRIPTIVE/LONG TEXT fields (e.g., notes, comments, descriptions):
+    - Concatenate unique non-null values with ' | ' separator
+    - Use: lambda x: ' | '.join(x.dropna().unique().astype(str)) if len(x.dropna()) > 0 else None
+6. For fields that can't be aggregated properly:
+    - Use first non-null value: lambda x: x.dropna().iloc[0] if len(x.dropna()) > 0 else None
+7. DO NOT create multiple files
+8. Result: ONE row per master record with intelligently aggregated values
 """
         
         if strategy == "KEEP_ALL":
@@ -1165,7 +1178,9 @@ CRITICAL REQUIREMENTS:
 For one-to-many data:
 - Group by master record (MASTER_UID)
 - Apply aggregation strategy to numeric columns
-- For text/date: use random selection from grouped values (except MAX/MIN use that directly)
+- For text/categorical fields: use MODE (most frequent value) for short text, concatenate unique values for long text/descriptions
+- For date fields: use latest (max) date by default
+- For any other non-numeric: use first non-null value
 - Result: ONE row per unique MASTER_UID
 
 Code structure (FOLLOW EXACTLY):
@@ -1174,7 +1189,6 @@ Code structure (FOLLOW EXACTLY):
    ```python
    import pandas as pd
    import os
-   import random
    
    dfs = []  # List to store (df, source_name) tuples
    ```
@@ -1214,23 +1228,48 @@ Code structure (FOLLOW EXACTLY):
    - Use first non-null value OR
    - Apply aggregation logic
 
-7. **Identify column data types for aggregation**:
+7. **Identify column data types for smart aggregation**:
    ```python
    numeric_cols = merged_df.select_dtypes(include=['number']).columns.tolist()
+   date_cols = merged_df.select_dtypes(include=['datetime64']).columns.tolist()
    text_cols = merged_df.select_dtypes(include=['object']).columns.tolist()
-   # Remove MASTER_UID from aggregation lists
+   # Also try to detect date columns stored as strings
+   for col in text_cols[:]:
+       try:
+           pd.to_datetime(merged_df[col].dropna().head(20), errors='raise')
+           date_cols.append(col)
+           text_cols.remove(col)
+           merged_df[col] = pd.to_datetime(merged_df[col], errors='coerce')
+       except:
+           pass
+   # Remove MASTER_UID and _source_file from aggregation lists
    ```
 
-8. **Build aggregation dictionary**:
+8. **Build SMART aggregation dictionary**:
    ```python
    agg_dict = {{}}
+   # Numeric columns: apply the chosen aggregation
    for col in numeric_cols:
        if col != 'MASTER_UID':
            agg_dict[col] = '{strategy.replace("AGGREGATE_", "").lower() if strategy else "sum"}'
    
-   for col in text_cols:
+   # Date columns: use max (latest date) by default
+   for col in date_cols:
        if col != 'MASTER_UID':
-           agg_dict[col] = lambda x: x.dropna().iloc[0] if len(x.dropna()) > 0 else None
+           agg_dict[col] = 'max'
+   
+   # Text columns: intelligent handling per column type
+   # Short categorical fields (names, statuses, types) -> MODE (most frequent)
+   # Long descriptive fields (notes, comments) -> concatenate unique values
+   for col in text_cols:
+       if col not in ('MASTER_UID', '_source_file'):
+           avg_len = merged_df[col].dropna().astype(str).str.len().mean()
+           if avg_len > 50:
+               # Long text -> concatenate unique values
+               agg_dict[col] = lambda x: ' | '.join(x.dropna().unique().astype(str)) if len(x.dropna()) > 0 else None
+           else:
+               # Short text -> mode (most frequent value)
+               agg_dict[col] = lambda x: x.dropna().mode().iloc[0] if len(x.dropna().mode()) > 0 else (x.dropna().iloc[0] if len(x.dropna()) > 0 else None)
    ```
 
 9. **Group by MASTER_UID and aggregate**:
@@ -1819,7 +1858,7 @@ OUTPUT (JSON):
         
         logger.info("   - Always creates ONE master file")
         logger.info("   - Numeric fields aggregated per strategy")
-        logger.info("   - Text fields randomly selected from detail records")
+        logger.info("   - Text fields intelligently aggregated (mode/concatenation)")
         logger.info("")
         logger.info("🚀 " + "="*55)
         logger.info("")
@@ -1921,7 +1960,7 @@ OUTPUT (JSON):
                 else:
                     logger.info(f"   - One-to-many data aggregated using: {agg_strategy}")
                     logger.info("   - Numeric fields: aggregated per strategy")
-                    logger.info("   - Text fields: randomly selected from detail records")
+                    logger.info("   - Text fields: intelligently aggregated (mode/concatenation)")
             logger.info("   - Output: Single unified file with all data merged")
             logger.info("✅ " + "="*55)
             logger.info("")
