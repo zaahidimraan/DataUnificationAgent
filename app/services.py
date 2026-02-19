@@ -1283,7 +1283,18 @@ Code structure (FOLLOW EXACTLY):
     print(f"✅ Unified data created: {{len(final_df)}} unique records")
     ```
 
-11. **Save to Excel**:
+11. **Preserve integer data types** (CRITICAL - prevents int→float conversion):
+    ```python
+    # After all processing, fix columns that were originally integers but became floats due to NaN
+    for col in final_df.columns:
+        if final_df[col].dtype == 'float64':
+            # Check if all non-null values are whole numbers
+            non_null = final_df[col].dropna()
+            if len(non_null) > 0 and (non_null == non_null.astype(int)).all():
+                final_df[col] = final_df[col].astype('Int64')  # Nullable integer type (handles NaN)
+    ```
+
+12. **Save to Excel**:
     ```python
     final_df.to_excel('{safe_output_path}', index=False, engine='openpyxl')
     print("SUCCESS: Unified data saved to master_unified_data.xlsx")
@@ -1295,6 +1306,7 @@ COMMON PITFALLS TO AVOID:
 - ❌ Forgetting to handle NaN in key columns (breaks groupby)
 - ❌ Using wrong aggregation type (text columns don't sum!)
 - ❌ Not verifying unique MASTER_UIDs after aggregation
+- ❌ Integer columns becoming float due to NaN (use Int64 nullable type!)
 
 OUTPUT: Complete, executable Python code only. No markdown, no explanations."""
         
